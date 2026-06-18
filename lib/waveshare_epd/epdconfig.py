@@ -22,20 +22,21 @@ CS_PIN = 8
 _gpio_rst = None
 _gpio_dc = None
 _gpio_busy = None
-_gpio_cs = None
 SPI = None
 
 
 def module_init():
     """Initialize SPI and GPIO. Returns 0 on success."""
-    global _gpio_rst, _gpio_dc, _gpio_busy, _gpio_cs, SPI
+    global _gpio_rst, _gpio_dc, _gpio_busy, SPI
 
     from gpiozero import OutputDevice, InputDevice
 
     _gpio_rst = OutputDevice(RST_PIN)
     _gpio_dc = OutputDevice(DC_PIN)
     _gpio_busy = InputDevice(BUSY_PIN)
-    _gpio_cs = OutputDevice(CS_PIN)
+    # NOTE: CS is handled by the hardware SPI driver (spidev), so we do not
+    # manually claim GPIO 8 here. gpiozero cannot share a pin already owned by
+    # the kernel SPI driver, which would raise "GPIO busy".
 
     # Initialize SPI
     import spidev
@@ -49,15 +50,15 @@ def module_init():
 
 def module_exit(cleanup=False):
     """Clean up GPIO and SPI."""
-    global _gpio_rst, _gpio_dc, _gpio_busy, _gpio_cs, SPI
+    global _gpio_rst, _gpio_dc, _gpio_busy, SPI
 
-    for gpio in (_gpio_rst, _gpio_dc, _gpio_busy, _gpio_cs):
+    for gpio in (_gpio_rst, _gpio_dc, _gpio_busy):
         try:
             if gpio is not None:
                 gpio.close()
         except Exception:
             pass
-    _gpio_rst = _gpio_dc = _gpio_busy = _gpio_cs = None
+    _gpio_rst = _gpio_dc = _gpio_busy = None
 
     try:
         if SPI is not None:
@@ -68,7 +69,10 @@ def module_exit(cleanup=False):
 
 def digital_write(pin, value):
     """Write a value (0 or 1) to the specified GPIO pin."""
-    line_map = {RST_PIN: _gpio_rst, DC_PIN: _gpio_dc, CS_PIN: _gpio_cs}
+    # CS_PIN is handled by hardware SPI; no manual control needed.
+    if pin == CS_PIN:
+        return
+    line_map = {RST_PIN: _gpio_rst, DC_PIN: _gpio_dc}
     gpio = line_map.get(pin)
     if gpio is None:
         raise ValueError(f"Pin {pin} is not configured as output")
