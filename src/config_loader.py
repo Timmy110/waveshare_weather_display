@@ -1,10 +1,9 @@
 import yaml
 import os
+import sys
 import logging
 
 logger = logging.getLogger(__name__)
-
-CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.yaml")
 
 DEFAULTS = {
     "location": {
@@ -28,9 +27,25 @@ DEFAULTS = {
 }
 
 
+def _find_config():
+    """Find config.yaml by walking up from the entry point or cwd."""
+    candidates = [
+        # Next to main.py (entry script)
+        os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "config.yaml"),
+        # Current working directory
+        os.path.join(os.getcwd(), "config.yaml"),
+        # Two levels up from this module (project root fallback)
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.yaml"),
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return candidates[0]
+
+
 def load_config(path=None):
     """Load configuration from YAML file, falling back to defaults."""
-    cfg_path = path or CONFIG_PATH
+    cfg_path = path or _find_config()
     
     config = {}
     for section, values in DEFAULTS.items():
