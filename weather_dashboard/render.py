@@ -2,6 +2,7 @@
 """Render weather data to two PIL images (black + red buffers) for e-Ink display."""
 
 import logging
+import math
 import os
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
@@ -55,14 +56,11 @@ WMO_CODES: Dict[int, Tuple[str, str]] = {
 
 def _default_font_path() -> Optional[str]:
     """Try common locations for a TrueType Collection / font file."""
-    # Priority: config override > bundled pic/Font.ttc > system fonts
     candidates = [
         os.path.join(os.path.dirname(__file__), "..", "pic", "Font.ttc"),
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/TTF/DejaVuSans.ttf",
         "/usr/share/fonts/dejavu/DejaVuSans.ttf",
-        "C:\\Windows\\Fonts\\dejavusans.ttf",
-        "C:\\Windows\\Fonts\\arial.ttf",
     ]
     for p in candidates:
         if os.path.isfile(p):
@@ -83,6 +81,49 @@ def _load_font(path: Optional[str], size: int) -> ImageFont.FreeTypeFont:
     return ImageFont.load_default()
 
 
+def _get_font_height(font, text="Hg"):
+    """
+    Get the height of a font in pixels.
+    Works with both old and new Pillow versions.
+    """
+    try:
+        size = font.getsize(text)
+        return size[1]
+    except AttributeError:
+        # Newer Pillow uses getbbox
+        bbox = font.getbbox(text)
+        if bbox:
+            return (bbox[3] - bbox[1]) + 1
+        return 20
+
+
+def _draw_thick_line(draw, xy, fill, thickness=1):
+    """
+    Draw a line with specified thickness.
+    For older Pillow that doesn't support width= in draw.line(),
+    we draw multiple adjacent lines.
+    """
+    if thickness <= 1:
+        draw.line(xy, fill=fill)
+        return
+    # Get the direction and draw parallel lines
+    if len(xy) >= 2:
+        x0, y0 = xy[0]
+        x1, y1 = xy[-1]
+        dx = x1 - x0
+        dy = y1 - y0
+        length = math.sqrt(dx * dx + dy * dy)
+        if length > 0:
+            nx = -dy / length
+            ny = dx / length
+            for t in range(-thickness // 2, (thickness // 2) + 1):
+                new_x0 = x0 + int(nx * t)
+                new_y0 = y0 + int(ny * t)
+                new_x1 = x1 + int(nx * t)
+                new_y1 = y1 + int(ny * t)
+                draw.line([(new_x0, new_y0), (new_x1, new_y1)], fill=fill)
+
+
 def _draw_glyph(draw: ImageDraw.ImageDraw, glyph: str, cx: int, cy: int, r: int, fill: int) -> None:
     """
     Draw a simple geometric weather glyph centered at (cx, cy) with radius r.
@@ -92,12 +133,11 @@ def _draw_glyph(draw: ImageDraw.ImageDraw, glyph: str, cx: int, cy: int, r: int,
         draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=fill)
         # Rays
         for angle in range(0, 360, 45):
-            import math
             x1 = int(cx + (r * 0.6) * math.cos(math.radians(angle)))
             y1 = int(cy + (r * 0.6) * math.sin(math.radians(angle)))
             x2 = int(cx + (r * 1.3) * math.cos(math.radians(angle)))
             y2 = int(cy + (r * 1.3) * math.sin(math.radians(angle)))
-            draw.line([(x1, y1), (x2, y2)], fill=fill, width=2)
+            _draw_thick_line(draw, [(x1, y1), (x2, y2)], fill=fill, thickness=2)
 
     elif glyph == "cloud":
         # Cloud: overlapping ellipses
@@ -109,20 +149,20 @@ def _draw_glyph(draw: ImageDraw.ImageDraw, glyph: str, cx: int, cy: int, r: int,
         # Sun peeking behind cloud
         draw.ellipse([cx - r, cy - r, cx + r, cy + int(r * 0.2)], fill=fill)
         for angle in range(-60, 30, 45):
-            import math
             x1 = int(cx + (r * 0.5) * math.cos(math.radians(angle)))
             y1 = int(cy + (r * 0.5) * math.sin(math.radians(angle)) - r * 0.2)
             x2 = int(cx + (r * 1.0) * math.cos(math.radians(angle)))
             y2 = int(cy + (r * 1.0) * math.sin(math.radians(angle)) - r * 0.2)
-            draw.line([(x1, y1), (x2, y2)], fill=fill, width=2)
+            _draw_thick_line(draw, [(x1, y1), (x2, y2)], fill=fill, thickness=2)
 
     elif glyph == "rain":
         # Cloud body + rain lines below
         draw.ellipse([cx - r, cy - int(r * 1.0), cx + r, cy], fill=fill)
         for dx in [-int(r * 0.6), 0, int(r * 0.6)]:
-            draw.line(
+            _draw_thick_line(
+                draw,
                 [(cx + dx, cy + int(r * 0.3)), (cx + dx - int(r * 0.2), cy + r)],
-                fill=fill, width=2,
+                fill=fill, thickness=2,
             )
 
     elif glyph == "snow":
@@ -136,9 +176,10 @@ def _draw_glyph(draw: ImageDraw.ImageDraw, glyph: str, cx: int, cy: int, r: int,
     elif glyph == "fog":
         # Horizontal bars
         for dy in [-int(r * 0.6), 0, int(r * 0.6)]:
-            draw.line(
+            _draw_thick_line(
+                draw,
                 [(cx - r, cy + dy), (cx + r, cy + dy)],
-                fill=fill, width=3,
+                fill=fill, thickness=3,
             )
 
     elif glyph == "thunder":
@@ -207,9 +248,8 @@ def render_weather(
 
     # Large temperature (drawn in red for emphasis)
     draw_r.text((40, y_top), temp_str, font=font_large, fill=COLOR_RED)
-    # Move past the large text
-    bbox = font_large.getbbox(temp_str)
-    temp_height = (bbox[3] - bbox[1]) + 10 if bbox else 80
+    # Move past the large text - use helper for cross-Pillow compat
+    temp_height = _get_font_height(font_large) + 10
     y_top += temp_height
 
     # Condition text + glyph side by side
@@ -230,21 +270,19 @@ def render_weather(
 
     # Last updated timestamp (top-right corner)
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    draw_b.text((WIDTH - 10 - len(now_str) * 8, 10), f"Updated: {now_str}", font=font_tiny, fill=COLOR_BLACK)
+    timestamp_x = max(10, WIDTH - 10 - len(f"Updated: {now_str}") * 8)
+    draw_b.text((timestamp_x, 10), f"Updated: {now_str}", font=font_tiny, fill=COLOR_BLACK)
 
     # Stale data indicator (if needed)
     if stale:
         draw_r.text((WIDTH - 220, 10), "!! STALE DATA !!", font=font_small, fill=COLOR_RED)
 
-    # Separator line
+    # Separator line (thick)
     sep_y = int(HEIGHT * 0.6)
-    draw_b.line([(0, sep_y), (WIDTH, sep_y)], fill=COLOR_BLACK, width=2)
+    _draw_thick_line(draw_b, [(0, sep_y), (WIDTH, sep_y)], fill=COLOR_BLACK, thickness=2)
 
     # --- BOTTOM SECTION: 5-Day Forecast Strip ---------------------------------
     forecast = weather.get("forecast", [])
-    n_days = len(forecast)
-    if n_days == 0:
-        n_days = 1  # prevent zero-division
 
     strip_top = sep_y + 20
     day_width = WIDTH // 5
@@ -275,7 +313,7 @@ def render_weather(
         # Column divider (not after last column)
         if i < 4:
             div_x = (i + 1) * day_width
-            draw_b.line([(div_x, strip_top), (div_x, HEIGHT - 5)], fill=COLOR_BLACK, width=1)
+            draw_b.line([(div_x, strip_top), (div_x, HEIGHT - 5)], fill=COLOR_BLACK)
 
     return black_img, red_img
 
