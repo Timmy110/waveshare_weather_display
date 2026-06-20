@@ -170,7 +170,9 @@ def main() -> int:
         from waveshare_epd import epd7in5b_V2
         epd = epd7in5b_V2.EPD()
         logger.info("Initializing e-Paper display ...")
-        epd.init()
+        init_result = epd.init()
+        if init_result != 0:
+            raise RuntimeError(f"epd.init() failed with return code {init_result}")
         init_called = True
 
         logger.info("Sending image buffers to display (full refresh ~15-20s) ...")

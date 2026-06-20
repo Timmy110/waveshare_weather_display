@@ -27,16 +27,14 @@ _spi = None
 
 
 def digital_write(pin, value):
-    """Write a digital value to a GPIO pin using RPi.GPIO."""
+    """Write a digital value to a GPIO pin. Assumes GPIO is already set up."""
     import RPi.GPIO as GPIO
-    GPIO.setup(pin, GPIO.OUT)
     GPIO.output(pin, value)
 
 
 def digital_read(pin):
-    """Read a digital value from a GPIO pin using RPi.GPIO."""
+    """Read a digital value from a GPIO pin. Assumes GPIO is already set up."""
     import RPi.GPIO as GPIO
-    GPIO.setup(pin, GPIO.IN)
     return GPIO.input(pin)
 
 
@@ -50,7 +48,6 @@ def spi_writebyte(data):
     global _spi
     if _spi is None:
         return
-    import spidev
     _spi.writebytes(data)
 
 
@@ -59,9 +56,7 @@ def spi_writebyte2(data):
     global _spi
     if _spi is None:
         return
-    import spidev
-    # xfer2 does not wait for response, slightly faster
-    _spi.xfer2([0x00] + list(data))  # dummy read + write
+    _spi.xfer2([0x00] + list(data))
 
 
 def module_init():
@@ -88,7 +83,7 @@ def module_init():
 
     except ImportError as e:
         logger.error("Missing dependency for GPIO/SPI: %s", e)
-        logger.error("Install with: sudo apt install python3-gpio && pip3 install spidev RPi.GPIO")
+        logger.error("Install with: pip3 install spidev RPi.GPIO")
         return -1
 
     except Exception as e:
