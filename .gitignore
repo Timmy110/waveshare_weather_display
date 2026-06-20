@@ -21,3 +21,4 @@ logs/
 # Virtual environment
 .venv/
 venv/
+config.json
