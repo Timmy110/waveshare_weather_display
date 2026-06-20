@@ -3,7 +3,6 @@
 
 import logging
 import os
-import sys
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
@@ -216,7 +215,7 @@ def render_weather(
     # Condition text + glyph side by side
     glyph_y = y_top + 5
     glyph_r = 25
-    draw_glyph(draw_b, glyph_type, 40, glyph_y + glyph_r, glyph_r, COLOR_BLACK)
+    _draw_glyph(draw_b, glyph_type, 40, glyph_y + glyph_r, glyph_r, COLOR_BLACK)
     draw_b.text((90, y_top), condition_text, font=font_medium, fill=COLOR_BLACK)
 
     # High / Low for today
@@ -265,9 +264,9 @@ def render_weather(
         glyph_r_small = 18
         is_precip = day_glyph in ("rain", "snow", "thunder")
         if is_precip:
-            draw_glyph(draw_r, day_glyph, x_base + glyph_r_small, glyph_y_pos + glyph_r_small, glyph_r_small, COLOR_RED)
+            _draw_glyph(draw_r, day_glyph, x_base + glyph_r_small, glyph_y_pos + glyph_r_small, glyph_r_small, COLOR_RED)
         else:
-            draw_glyph(draw_b, day_glyph, x_base + glyph_r_small, glyph_y_pos + glyph_r_small, glyph_r_small, COLOR_BLACK)
+            _draw_glyph(draw_b, day_glyph, x_base + glyph_r_small, glyph_y_pos + glyph_r_small, glyph_r_small, COLOR_BLACK)
 
         # High / Low temps for forecast day
         hi_lo_forecast = f"{day_high}{unit_sym} / {day_low}{unit_sym}"
