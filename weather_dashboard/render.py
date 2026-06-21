@@ -340,7 +340,7 @@ def render_weather(
     
     # Font sizes
     if font_path and os.path.isfile(font_path):
-        font_clock = _load_font(font_path, 64)          # clock display
+        font_clock = _load_font(font_path, 78)          # clock display
         font_temp_large = _load_font(font_path, 72)     # current temperature
         font_icon_label = _load_font(font_path, 32)     # condition text
         font_detail = _load_font(font_path, 24)         # wind, feels like, etc
@@ -377,10 +377,10 @@ def render_weather(
     left_col_width = 390       # left column width (clock + hourly)
     divider_x = left_col_width + 5  # vertical separator between left/right
     right_col_x = divider_x + 10    # start of right column
-    top_section_h = 240        # height of top section
+    top_section_h = 220        # height of top section (reduced to fix overlap)
     forecast_top = top_section_h + 20
-    forecast_bottom = HEIGHT - 50
-    footer_y = HEIGHT - 35
+    forecast_bottom = HEIGHT - 35
+    footer_y = HEIGHT - 22     # smaller footer
 
     # ========================================================================
     # TOP LEFT: CLOCK
@@ -550,7 +550,7 @@ def render_weather(
         draw_b.text((x_center - lo_w // 2, lo_y), day_low, font=font_forecast_temp, fill=COLOR_BLACK)
 
         # Column divider (not after last column)
-        if i < num_days - 1 and i < 4:
+        if i < num_days - 1 and i < 5:
             div_x = (i + 1) * day_width
             draw_b.line([(div_x, strip_top), (div_x, forecast_bottom)], fill=COLOR_BLACK)
 
