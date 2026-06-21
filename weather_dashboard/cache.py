@@ -74,6 +74,7 @@ def weather_data_hash(weather: Dict[str, Any]) -> str:
             "feels_like": weather.get("current", {}).get("feels_like"),
             "wind_speed": weather.get("current", {}).get("wind_speed"),
         },
+        "hourly_forecast": weather.get("hourly_forecast", []),
         "today_high": weather.get("today_high"),
         "today_low": weather.get("today_low"),
         "forecast": weather.get("forecast", []),
