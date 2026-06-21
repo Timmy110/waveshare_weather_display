@@ -182,10 +182,15 @@ def _load_icon_mask(icon_name: str, size: int) -> Optional[Image.Image]:
         img = Image.open(icon_path)
         # Scale to requested size with LANCZOS (highest quality downsampling)
         img = img.resize((size, size), Image.LANCZOS)
-        # Convert to grayscale first
-        img = img.convert("L")
-        # Threshold: dark icon pixels -> 255 (mask active), light background -> 0 (inactive)
-        mask = img.point(lambda p: 255 if p < 128 else 0)
+
+        if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+            # Use alpha channel as the mask — non-transparent pixels become active
+            alpha = img.convert("L")
+            mask = alpha.point(lambda p: 255 if p > 128 else 0)
+        else:
+            # No transparency — use luminance threshold (dark-on-light icons)
+            gray = img.convert("L")
+            mask = gray.point(lambda p: 255 if p < 128 else 0)
         mask = mask.convert("1")
 
         # Cache the result
