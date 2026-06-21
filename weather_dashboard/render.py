@@ -377,7 +377,7 @@ def render_weather(
     left_col_width = 390       # left column width (clock + hourly)
     divider_x = left_col_width + 5  # vertical separator between left/right
     right_col_x = divider_x + 10    # start of right column
-    top_section_h = 220        # height of top section (reduced to fix overlap)
+    top_section_h = 240        # height of top section
     forecast_top = top_section_h + 20
     forecast_bottom = HEIGHT - 35
     footer_y = HEIGHT - 22     # smaller footer
@@ -459,12 +459,12 @@ def render_weather(
     # Large weather icon (centered in right column)
     right_col_width = WIDTH - right_col_x - margin
     icon_cx = right_col_x + right_col_width // 2
-    icon_cy = y_right + 60
+    icon_cy = y_right + 20
     icon_size_large = 80
     _paste_icon(black_img, icon_name, icon_cx, icon_cy, icon_size_large)
 
     # Large temperature (RED) below icon
-    temp_y = icon_cy + icon_size_large + 15
+    temp_y = icon_cy + icon_size_large // 2 + 5
     temp_width = _get_text_width(font_temp_large, temp_str)
     temp_x = right_col_x + (right_col_width - temp_width) // 2
     draw_r.text((temp_x, temp_y), temp_str, font=font_temp_large, fill=COLOR_RED)

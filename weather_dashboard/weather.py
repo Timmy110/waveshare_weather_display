@@ -36,8 +36,8 @@ def fetch_weather(
         "hourly": "temperature,weather_code",
         "daily": "weather_code,temperature_2m_max,temperature_2m_min",
         "temperature_unit": unit,
-        # We want today + 4 more days = 5 days total
-        "forecast_days": 5,
+        # We want today + 5 more days = 6 days from API (skip today for 5 forecast days)
+        "forecast_days": 6,
     }
 
     try:
