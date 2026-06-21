@@ -183,14 +183,22 @@ def _load_icon_mask(icon_name: str, size: int) -> Optional[Image.Image]:
         # Scale to requested size with LANCZOS (highest quality downsampling)
         img = img.resize((size, size), Image.LANCZOS)
 
-        if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
-            # Use alpha channel as the mask — non-transparent pixels become active
-            alpha = img.convert("L")
-            mask = alpha.point(lambda p: 255 if p > 128 else 0)
+        # Extract alpha channel to determine opaque pixels (icon shape)
+        if img.mode in ("RGBA", "LA"):
+            # Directly extract the alpha channel (index 3 for RGBA, index 1 for LA)
+            alpha = img.split()[-1]
+        elif img.mode == "P" and "transparency" in img.info:
+            # Palette mode with transparency — convert to RGBA first, then get alpha
+            alpha = img.convert("RGBA").split()[3]
         else:
-            # No transparency — use luminance threshold (dark-on-light icons)
+            # No transparency info — use luminance threshold (dark-on-light icons)
             gray = img.convert("L")
-            mask = gray.point(lambda p: 255 if p < 128 else 0)
+            mask = gray.point(lambda p: 255 if p < 128 else 0).convert("1")
+            _icon_cache.setdefault(icon_name, {})[size] = mask
+            return mask
+        
+        # Threshold alpha: opaque pixels (>128) become the icon shape
+        mask = alpha.point(lambda p: 255 if p > 128 else 0).convert("1")
         mask = mask.convert("1")
 
         # Cache the result
