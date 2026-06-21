@@ -8,6 +8,12 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from PIL import Image, ImageDraw, ImageFont
+import io
+
+try:
+    import cairosvg
+except ImportError:
+    cairosvg = None
 
 logger = logging.getLogger(__name__)
 
@@ -20,12 +26,12 @@ COLOR_BLACK = 0      # black ink (active pixel in black buffer)
 COLOR_RED = 0        # red ink (active pixel in red buffer)
 
 # --- Weather code mapping ---------------------------------------------------
-# WMO weather interpretation codes -> (text label, glyph type)
+# WMO weather interpretation codes -> (text label, icon name)
 # https://open-meteo.com/en/docs#weather+codes
 WMO_CODES: Dict[int, Tuple[str, str]] = {
     0: ("Clear Sky", "sun"),
     1: ("Mainly Clear", "sun"),
-    2: ("Partly Cloudy", "cloud-sun"),
+    2: ("Partly Cloudy", "partly_cloudy"),
     3: ("Overcast", "cloud"),
     45: ("Foggy", "fog"),
     48: ("Rime Fog", "fog"),
@@ -52,6 +58,20 @@ WMO_CODES: Dict[int, Tuple[str, str]] = {
     96: ("Thunderstorm Hail", "thunder"),
     99: ("Severe Thunderstorm", "thunder"),
 }
+
+# Icon file mapping (icon name -> SVG filename)
+ICON_FILES = {
+    "sun": "sun.svg",
+    "cloud": "cloud.svg",
+    "partly_cloudy": "partly_cloudy.svg",
+    "rain": "rain.svg",
+    "snow": "snow.svg",
+    "fog": "fog.svg",
+    "thunder": "thunder.svg",
+}
+
+# Pre-rendered icon cache: {icon_name: {size: Image}}
+_icon_cache: Dict[str, Dict[int, Image.Image]] = {}
 
 
 def _default_font_path() -> Optional[str]:
@@ -136,81 +156,85 @@ def _draw_thick_line(draw, xy, fill, thickness=1):
                 draw.line([(new_x0, new_y0), (new_x1, new_y1)], fill=fill)
 
 
-def _draw_glyph(draw: ImageDraw.ImageDraw, glyph: str, cx: int, cy: int, r: int, fill: int) -> None:
+def _load_icon(icon_name: str, size: int) -> Optional[Image.Image]:
     """
-    Draw a simple geometric weather glyph centered at (cx, cy) with radius r.
-    Uses PIL primitive shapes to keep dependencies minimal.
+    Load an SVG icon, render it at the specified size, and return as a 1-bit PIL image.
+    Icons are cached to avoid re-rendering on every call.
+    
+    Returns None if cairosvg is not available or icon loading fails.
     """
-    if glyph == "sun":
-        draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=fill)
-        # Rays
-        for angle in range(0, 360, 45):
-            x1 = int(cx + (r * 0.6) * math.cos(math.radians(angle)))
-            y1 = int(cy + (r * 0.6) * math.sin(math.radians(angle)))
-            x2 = int(cx + (r * 1.3) * math.cos(math.radians(angle)))
-            y2 = int(cy + (r * 1.3) * math.sin(math.radians(angle)))
-            _draw_thick_line(draw, [(x1, y1), (x2, y2)], fill=fill, thickness=2)
-
-    elif glyph == "cloud":
-        # Cloud: overlapping ellipses
-        draw.ellipse([cx - r, cy - int(r * 0.4), cx + r, cy + int(r * 0.6)], fill=fill)
-        draw.ellipse([cx - int(r * 1.3), cy, cx - int(r * 0.2), cy + int(r * 0.9)], fill=fill)
-        draw.ellipse([cx + int(r * 0.2), cy - int(r * 0.5), cx + int(r * 1.4), cy + int(r * 0.3)], fill=fill)
-
-    elif glyph == "cloud-sun":
-        # Sun peeking behind cloud
-        draw.ellipse([cx - r, cy - r, cx + r, cy + int(r * 0.2)], fill=fill)
-        for angle in range(-60, 30, 45):
-            x1 = int(cx + (r * 0.5) * math.cos(math.radians(angle)))
-            y1 = int(cy + (r * 0.5) * math.sin(math.radians(angle)) - r * 0.2)
-            x2 = int(cx + (r * 1.0) * math.cos(math.radians(angle)))
-            y2 = int(cy + (r * 1.0) * math.sin(math.radians(angle)) - r * 0.2)
-            _draw_thick_line(draw, [(x1, y1), (x2, y2)], fill=fill, thickness=2)
-
-    elif glyph == "rain":
-        # Cloud body + rain lines below
-        draw.ellipse([cx - r, cy - int(r * 1.0), cx + r, cy], fill=fill)
-        for dx in [-int(r * 0.6), 0, int(r * 0.6)]:
-            _draw_thick_line(
-                draw,
-                [(cx + dx, cy + int(r * 0.3)), (cx + dx - int(r * 0.2), cy + r)],
-                fill=fill, thickness=2,
-            )
-
-    elif glyph == "snow":
-        # Cloud body + snowflakes below
-        draw.ellipse([cx - r, cy - int(r * 1.0), cx + r, cy], fill=fill)
-        for dx in [-int(r * 0.6), 0, int(r * 0.6)]:
-            s = int(r * 0.15)
-            fy = cy + int(r * 0.5)
-            draw.ellipse([cx + dx - s, fy - s, cx + dx + s, fy + s], fill=fill)
-
-    elif glyph == "fog":
-        # Horizontal bars
-        for dy in [-int(r * 0.6), 0, int(r * 0.6)]:
-            _draw_thick_line(
-                draw,
-                [(cx - r, cy + dy), (cx + r, cy + dy)],
-                fill=fill, thickness=3,
-            )
-
-    elif glyph == "thunder":
-        # Cloud + lightning bolt
-        draw.ellipse([cx - r, cy - int(r * 1.0), cx + r, cy], fill=fill)
-        # Lightning zigzag
-        points = [
-            (cx + int(r * 0.2), cy + int(r * 0.2)),
-            (cx - int(r * 0.2), cy + int(r * 0.6)),
-            (cx + int(r * 0.1), cy + int(r * 0.6)),
-            (cx - int(r * 0.1), cy + r),
-        ]
-        draw.polygon(points, fill=fill)
+    # Check cache first
+    if icon_name in _icon_cache and size in _icon_cache[icon_name]:
+        return _icon_cache[icon_name][size]
+    
+    if cairosvg is None:
+        logger.warning("cairosvg not available, cannot render SVG icons")
+        return None
+    
+    # Resolve icon file path
+    filename = ICON_FILES.get(icon_name)
+    if not filename:
+        logger.warning("Unknown icon name: %s", icon_name)
+        return None
+    
+    # Look for the icon in the icons/ directory relative to this module
+    here = os.path.dirname(os.path.abspath(__file__))
+    icon_dir = os.path.join(here, "..", "icons")
+    icon_path = os.path.join(icon_dir, filename)
+    
+    if not os.path.isfile(icon_path):
+        logger.warning("Icon file not found: %s", icon_path)
+        return None
+    
+    try:
+        with open(icon_path, "r") as f:
+            svg_content = f.read()
+        
+        # Render SVG to PNG bytes at higher resolution, then scale down
+        png_data = cairosvg.svg2png(
+            bytestring=svg_content.encode("utf-8"),
+            output_width=size * 2,  # Render at 2x for better quality
+            output_height=size * 2,
+        )
+        
+        # Load PNG and convert to grayscale then 1-bit
+        img = Image.open(io.BytesIO(png_data))
+        img = img.resize((size, size), Image.LANCZOS)
+        img = img.convert("L")  # Grayscale
+        
+        # Threshold at 128: pixels darker than threshold become black (0), rest white (255)
+        img = img.point(lambda p: 0 if p < 128 else 255)
+        
+        # Cache the result
+        _icon_cache.setdefault(icon_name, {})[size] = img
+        return img
+        
+    except Exception as exc:
+        logger.error("Failed to load icon %s: %s", icon_name, exc)
+        return None
 
 
-def _condition_label_and_glyph(code: int) -> Tuple[str, str]:
-    """Return a human-readable condition label and glyph key for a WMO code."""
-    text, glyph = WMO_CODES.get(code, (f"Unknown ({code})", "cloud"))
-    return text, glyph
+def _paste_icon(base_img: Image.Image, icon_name: str, cx: int, cy: int, size: int) -> bool:
+    """
+    Paste an icon centered at (cx, cy) on the base image.
+    Returns True if icon was successfully pasted, False otherwise.
+    """
+    icon = _load_icon(icon_name, size)
+    if icon is None:
+        return False
+    
+    # Calculate top-left position for centered placement
+    x = cx - size // 2
+    y = cy - size // 2
+    
+    base_img.paste(icon, (x, y))
+    return True
+
+
+def _condition_label_and_icon(code: int) -> Tuple[str, str]:
+    """Return a human-readable condition label and icon name for a WMO code."""
+    text, icon = WMO_CODES.get(code, (f"Unknown ({code})", "cloud"))
+    return text, icon
 
 
 def render_weather(
@@ -230,6 +254,9 @@ def render_weather(
 
     Returns two PIL images in mode '1' (1-bit), ready for epd.getbuffer().
     """
+    # Clear icon cache on each render to allow updates
+    _icon_cache.clear()
+    
     # Font sizes
     if font_path and os.path.isfile(font_path):
         font_clock = _load_font(font_path, 64)          # clock display
@@ -262,7 +289,7 @@ def render_weather(
     cur = weather["current"]
     unit_sym = "°F" if weather.get("unit") == "fahrenheit" else "°C"
     temp_str = f"{cur['temperature']:.0f}{unit_sym}"
-    condition_text, glyph_type = _condition_label_and_glyph(cur["weather_code"])
+    condition_text, icon_name = _condition_label_and_icon(cur["weather_code"])
 
     # --- LAYOUT CONSTANTS ---------------------------------------------------
     margin = 15
@@ -313,7 +340,6 @@ def render_weather(
     num_hours = len(hourly_forecast) if hourly_forecast else 0
     if num_hours > 0:
         available_width = left_col_width - margin * 2
-        # Each hour block needs: time label + icon space + temp
         hour_block_width = max(available_width // num_hours, 40)
     else:
         hour_block_width = 50
@@ -322,7 +348,7 @@ def render_weather(
         x_base = margin + i * hour_block_width
         hour_label = hour_data.get("hour", "?")
         hour_temp = f"{hour_data.get('temperature', '?'):.0f}"
-        _, hour_glyph = _condition_label_and_glyph(hour_data.get("weather_code", 0))
+        _, hour_icon = _condition_label_and_icon(hour_data.get("weather_code", 0))
 
         # Time label
         time_text = hour_label
@@ -330,15 +356,18 @@ def render_weather(
         draw_b.text((x_base + (hour_block_width - tw) // 2, y_hourly_start),
                     time_text, font=font_hourly_time, fill=COLOR_BLACK)
 
-        # Small glyph
-        glyph_y = y_hourly_start + _get_font_height(font_hourly_time) + 8
-        glyph_r = 10
-        _draw_glyph(draw_b, hour_glyph, x_base + hour_block_width // 2, glyph_y + glyph_r, glyph_r, COLOR_BLACK)
+        # Icon (centered in block)
+        icon_center_y = y_hourly_start + _get_font_height(font_hourly_time) + 15
+        icon_size = 20
+        cx = x_base + hour_block_width // 2
+        if not _paste_icon(black_img, hour_icon, cx, icon_center_y, icon_size):
+            # Fallback: draw a simple dot if icon fails
+            black_img.putpixel((cx, icon_center_y), COLOR_BLACK)
 
-        # Temperature
+        # Temperature below icon
         temp_text = f"{hour_temp}°"
         tpw = _get_text_width(font_hourly_temp, temp_text)
-        draw_b.text((x_base + (hour_block_width - tpw) // 2, glyph_y + glyph_r * 2 + 5),
+        draw_b.text((x_base + (hour_block_width - tpw) // 2, icon_center_y + icon_size),
                     temp_text, font=font_hourly_temp, fill=COLOR_BLACK)
 
     # ========================================================================
@@ -350,11 +379,11 @@ def render_weather(
     right_col_width = WIDTH - right_col_x - margin
     icon_cx = right_col_x + right_col_width // 2
     icon_cy = y_right + 60
-    icon_radius = 40
-    _draw_glyph(draw_b, glyph_type, icon_cx, icon_cy + icon_radius, icon_radius, COLOR_BLACK)
+    icon_size_large = 80
+    _paste_icon(black_img, icon_name, icon_cx, icon_cy, icon_size_large)
 
     # Large temperature (RED) below icon
-    temp_y = icon_cy + icon_radius * 2 + 15
+    temp_y = icon_cy + icon_size_large + 15
     temp_width = _get_text_width(font_temp_large, temp_str)
     temp_x = right_col_x + (right_col_width - temp_width) // 2
     draw_r.text((temp_x, temp_y), temp_str, font=font_temp_large, fill=COLOR_RED)
@@ -417,24 +446,24 @@ def render_weather(
         dw = _get_text_width(font_forecast_day, day_label)
         draw_b.text((x_center - dw // 2, y_pos), day_label, font=font_forecast_day, fill=COLOR_BLACK)
 
-        # Forecast glyph
-        _, day_glyph = _condition_label_and_glyph(day.get("weather_code", 0))
-        glyph_y_pos = y_pos + _get_font_height(font_forecast_day) + 10
-        glyph_r_small = 20
-        is_precip = day_glyph in ("rain", "snow", "thunder")
+        # Forecast icon
+        _, day_icon = _condition_label_and_icon(day.get("weather_code", 0))
+        icon_center_y = y_pos + _get_font_height(font_forecast_day) + 30
+        icon_size_medium = 40
+        
+        is_precip = day_icon in ("rain", "snow", "thunder")
         if is_precip:
-            _draw_glyph(draw_r, day_glyph, x_center, glyph_y_pos + glyph_r_small,
-                       glyph_r_small, COLOR_RED)
+            # Red icons for precipitation days
+            _paste_icon(red_img, day_icon, x_center, icon_center_y, icon_size_medium)
         else:
-            _draw_glyph(draw_b, day_glyph, x_center, glyph_y_pos + glyph_r_small,
-                       glyph_r_small, COLOR_BLACK)
+            _paste_icon(black_img, day_icon, x_center, icon_center_y, icon_size_medium)
 
-        # High temp (red accent)
-        hi_y = glyph_y_pos + glyph_r_small * 2 + 10
+        # High temp (red accent) below icon
+        hi_y = icon_center_y + icon_size_medium // 2 + 5
         hi_w = _get_text_width(font_forecast_temp, day_high)
         draw_r.text((x_center - hi_w // 2, hi_y), day_high, font=font_forecast_temp, fill=COLOR_RED)
 
-        # Low temp
+        # Low temp below high
         lo_y = hi_y + _get_font_height(font_forecast_temp) + 5
         lo_w = _get_text_width(font_forecast_temp, day_low)
         draw_b.text((x_center - lo_w // 2, lo_y), day_low, font=font_forecast_temp, fill=COLOR_BLACK)
