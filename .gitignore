@@ -22,3 +22,4 @@ logs/
 .venv/
 venv/
 config.json
+lib/waveshare_epd/examply.py

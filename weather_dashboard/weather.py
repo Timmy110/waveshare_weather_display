@@ -32,7 +32,7 @@ def fetch_weather(
         "latitude": latitude,
         "longitude": longitude,
         "timezone": timezone,
-        "current": "temperature,relative_humidity_2m,apparent_temperature,wind_speed_10m,weather_code,time",
+        "current": "temperature,relative_humidity_2m,apparent_temperature,wind_speed_10m,weather_code",
         "hourly": "temperature,weather_code",
         "daily": "weather_code,temperature_2m_max,temperature_2m_min",
         "temperature_unit": unit,
