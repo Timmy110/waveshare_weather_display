@@ -156,78 +156,165 @@ def _draw_thick_line(draw, xy, fill, thickness=1):
                 draw.line([(new_x0, new_y0), (new_x1, new_y1)], fill=fill)
 
 
-def _load_icon(icon_name: str, size: int) -> Optional[Image.Image]:
+def _load_icon_mask(icon_name: str, size: int) -> Optional[Image.Image]:
     """
-    Load an SVG icon, render it at the specified size, and return as a 1-bit PIL image.
-    Icons are cached to avoid re-rendering on every call.
+    Load an SVG icon and render it as a paste mask.
     
-    Returns None if cairosvg is not available or icon loading fails.
+    The returned image is in mode '1' where pixels are 255 at the shape of the icon
+    and 0 everywhere else (suitable as the mask parameter to Image.paste()).
+    
+    Icons are cached per name+size. Returns None on failure.
     """
     # Check cache first
     if icon_name in _icon_cache and size in _icon_cache[icon_name]:
         return _icon_cache[icon_name][size]
-    
+
     if cairosvg is None:
         logger.warning("cairosvg not available, cannot render SVG icons")
         return None
-    
+
     # Resolve icon file path
     filename = ICON_FILES.get(icon_name)
     if not filename:
         logger.warning("Unknown icon name: %s", icon_name)
         return None
-    
-    # Look for the icon in the icons/ directory relative to this module
+
     here = os.path.dirname(os.path.abspath(__file__))
     icon_dir = os.path.join(here, "..", "icons")
     icon_path = os.path.join(icon_dir, filename)
-    
+
     if not os.path.isfile(icon_path):
         logger.warning("Icon file not found: %s", icon_path)
         return None
-    
+
     try:
         with open(icon_path, "r") as f:
             svg_content = f.read()
-        
-        # Render SVG to PNG bytes at higher resolution, then scale down
+
+        # Render SVG to PNG at 2x resolution for quality
         png_data = cairosvg.svg2png(
             bytestring=svg_content.encode("utf-8"),
-            output_width=size * 2,  # Render at 2x for better quality
+            output_width=size * 2,
             output_height=size * 2,
         )
-        
-        # Load PNG and convert to grayscale then 1-bit
+
+        # Load, scale down, convert to grayscale
         img = Image.open(io.BytesIO(png_data))
         img = img.resize((size, size), Image.LANCZOS)
         img = img.convert("L")  # Grayscale
-        
-        # Threshold at 128: pixels darker than threshold become black (0), rest white (255)
-        img = img.point(lambda p: 0 if p < 128 else 255)
-        
+
+        # Threshold: dark icon pixels → 255 (mask active), light background → 0 (mask inactive)
+        mask = img.point(lambda p: 255 if p < 128 else 0)
+        mask = mask.convert("1")
+
         # Cache the result
-        _icon_cache.setdefault(icon_name, {})[size] = img
-        return img
-        
+        _icon_cache.setdefault(icon_name, {})[size] = mask
+        return mask
+
     except Exception as exc:
         logger.error("Failed to load icon %s: %s", icon_name, exc)
         return None
 
 
+def _draw_fallback_glyph(draw: ImageDraw.ImageDraw, glyph: str, cx: int, cy: int, r: int, fill: int) -> None:
+    """
+    Fallback geometric weather glyph when SVG icons are unavailable.
+    Centered at (cx, cy) with radius r.
+    """
+    if glyph == "sun":
+        draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=fill)
+        for angle in range(0, 360, 45):
+            x1 = int(cx + (r * 0.6) * math.cos(math.radians(angle)))
+            y1 = int(cy + (r * 0.6) * math.sin(math.radians(angle)))
+            x2 = int(cx + (r * 1.3) * math.cos(math.radians(angle)))
+            y2 = int(cy + (r * 1.3) * math.sin(math.radians(angle)))
+            _draw_thick_line(draw, [(x1, y1), (x2, y2)], fill=fill, thickness=2)
+
+    elif glyph == "cloud":
+        draw.ellipse([cx - r, cy - int(r * 0.4), cx + r, cy + int(r * 0.6)], fill=fill)
+        draw.ellipse([cx - int(r * 1.3), cy, cx - int(r * 0.2), cy + int(r * 0.9)], fill=fill)
+        draw.ellipse([cx + int(r * 0.2), cy - int(r * 0.5), cx + int(r * 1.4), cy + int(r * 0.3)], fill=fill)
+
+    elif glyph == "partly_cloudy":
+        draw.ellipse([cx - r, cy - r, cx + r, cy + int(r * 0.2)], fill=fill)
+        for angle in range(-60, 30, 45):
+            x1 = int(cx + (r * 0.5) * math.cos(math.radians(angle)))
+            y1 = int(cy + (r * 0.5) * math.sin(math.radians(angle)) - r * 0.2)
+            x2 = int(cx + (r * 1.0) * math.cos(math.radians(angle)))
+            y2 = int(cy + (r * 1.0) * math.sin(math.radians(angle)) - r * 0.2)
+            _draw_thick_line(draw, [(x1, y1), (x2, y2)], fill=fill, thickness=2)
+
+    elif glyph == "rain":
+        draw.ellipse([cx - r, cy - int(r * 1.0), cx + r, cy], fill=fill)
+        for dx in [-int(r * 0.6), 0, int(r * 0.6)]:
+            _draw_thick_line(
+                draw,
+                [(cx + dx, cy + int(r * 0.3)), (cx + dx - int(r * 0.2), cy + r)],
+                fill=fill, thickness=2,
+            )
+
+    elif glyph == "snow":
+        draw.ellipse([cx - r, cy - int(r * 1.0), cx + r, cy], fill=fill)
+        for dx in [-int(r * 0.6), 0, int(r * 0.6)]:
+            s = int(r * 0.15)
+            fy = cy + int(r * 0.5)
+            draw.ellipse([cx + dx - s, fy - s, cx + dx + s, fy + s], fill=fill)
+
+    elif glyph == "fog":
+        for dy in [-int(r * 0.6), 0, int(r * 0.6)]:
+            _draw_thick_line(
+                draw,
+                [(cx - r, cy + dy), (cx + r, cy + dy)],
+                fill=fill, thickness=3,
+            )
+
+    elif glyph == "thunder":
+        draw.ellipse([cx - r, cy - int(r * 1.0), cx + r, cy], fill=fill)
+        points = [
+            (cx + int(r * 0.2), cy + int(r * 0.2)),
+            (cx - int(r * 0.2), cy + int(r * 0.6)),
+            (cx + int(r * 0.1), cy + int(r * 0.6)),
+            (cx - int(r * 0.1), cy + r),
+        ]
+        draw.polygon(points, fill=fill)
+
+
 def _paste_icon(base_img: Image.Image, icon_name: str, cx: int, cy: int, size: int) -> bool:
     """
-    Paste an icon centered at (cx, cy) on the base image.
+    Paste an icon centered at (cx, cy) on the base black buffer.
+    Uses SVG mask pasting if cairosvg is available, else falls back to geometric glyph.
     Returns True if icon was successfully pasted, False otherwise.
     """
-    icon = _load_icon(icon_name, size)
-    if icon is None:
-        return False
-    
-    # Calculate top-left position for centered placement
-    x = cx - size // 2
-    y = cy - size // 2
-    
-    base_img.paste(icon, (x, y))
+    mask = _load_icon_mask(icon_name, size)
+    if mask is not None:
+        x = cx - size // 2
+        y = cy - size // 2
+        # Paste COLOR_BLACK (0) where mask is active (255)
+        base_img.paste(COLOR_BLACK, (x, y), mask)
+        return True
+
+    # Fallback to geometric glyph
+    draw = ImageDraw.Draw(base_img)
+    _draw_fallback_glyph(draw, icon_name, cx, cy, size // 2, COLOR_BLACK)
+    return True
+
+
+def _paste_icon_red(red_img: Image.Image, icon_name: str, cx: int, cy: int, size: int) -> bool:
+    """
+    Paste a RED icon centered at (cx, cy) on the red image buffer.
+    Falls back to geometric glyph if cairosvg is unavailable.
+    """
+    mask = _load_icon_mask(icon_name, size)
+    if mask is not None:
+        x = cx - size // 2
+        y = cy - size // 2
+        # Paste COLOR_RED (0 in red buffer) where mask is active (255)
+        red_img.paste(COLOR_RED, (x, y), mask)
+        return True
+
+    # Fallback to geometric glyph on red buffer
+    draw = ImageDraw.Draw(red_img)
+    _draw_fallback_glyph(draw, icon_name, cx, cy, size // 2, COLOR_RED)
     return True
 
 
@@ -453,8 +540,8 @@ def render_weather(
         
         is_precip = day_icon in ("rain", "snow", "thunder")
         if is_precip:
-            # Red icons for precipitation days
-            _paste_icon(red_img, day_icon, x_center, icon_center_y, icon_size_medium)
+            # Red icons for precipitation days (uses special red buffer)
+            _paste_icon_red(red_img, day_icon, x_center, icon_center_y, icon_size_medium)
         else:
             _paste_icon(black_img, day_icon, x_center, icon_center_y, icon_size_medium)
 
