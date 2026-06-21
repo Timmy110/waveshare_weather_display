@@ -8,12 +8,6 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from PIL import Image, ImageDraw, ImageFont
-import io
-
-try:
-    import cairosvg
-except ImportError:
-    cairosvg = None
 
 logger = logging.getLogger(__name__)
 
@@ -59,15 +53,15 @@ WMO_CODES: Dict[int, Tuple[str, str]] = {
     99: ("Severe Thunderstorm", "thunder"),
 }
 
-# Icon file mapping (icon name -> SVG filename)
+# Icon file mapping (icon name -> PNG filename)
 ICON_FILES = {
-    "sun": "sun.svg",
-    "cloud": "cloud.svg",
-    "partly_cloudy": "partly_cloudy.svg",
-    "rain": "rain.svg",
-    "snow": "snow.svg",
-    "fog": "fog.svg",
-    "thunder": "thunder.svg",
+    "sun": "sun.png",
+    "cloud": "cloud.png",
+    "partly_cloudy": "partly_cloudy.png",
+    "rain": "rain.png",
+    "snow": "snow.png",
+    "fog": "fog.png",
+    "thunder": "thunder.png",
 }
 
 # Pre-rendered icon cache: {icon_name: {size: Image}}
@@ -158,7 +152,7 @@ def _draw_thick_line(draw, xy, fill, thickness=1):
 
 def _load_icon_mask(icon_name: str, size: int) -> Optional[Image.Image]:
     """
-    Load an SVG icon and render it as a paste mask.
+    Load a pre-rendered PNG icon and convert it to a paste mask.
     
     The returned image is in mode '1' where pixels are 255 at the shape of the icon
     and 0 everywhere else (suitable as the mask parameter to Image.paste()).
@@ -168,10 +162,6 @@ def _load_icon_mask(icon_name: str, size: int) -> Optional[Image.Image]:
     # Check cache first
     if icon_name in _icon_cache and size in _icon_cache[icon_name]:
         return _icon_cache[icon_name][size]
-
-    if cairosvg is None:
-        logger.warning("cairosvg not available, cannot render SVG icons")
-        return None
 
     # Resolve icon file path
     filename = ICON_FILES.get(icon_name)
@@ -188,22 +178,13 @@ def _load_icon_mask(icon_name: str, size: int) -> Optional[Image.Image]:
         return None
 
     try:
-        with open(icon_path, "r") as f:
-            svg_content = f.read()
-
-        # Render SVG to PNG at 2x resolution for quality
-        png_data = cairosvg.svg2png(
-            bytestring=svg_content.encode("utf-8"),
-            output_width=size * 2,
-            output_height=size * 2,
-        )
-
-        # Load, scale down, convert to grayscale
-        img = Image.open(io.BytesIO(png_data))
+        # Load PNG directly
+        img = Image.open(icon_path)
+        # Scale to requested size with LANCZOS (highest quality downsampling)
         img = img.resize((size, size), Image.LANCZOS)
-        img = img.convert("L")  # Grayscale
-
-        # Threshold: dark icon pixels → 255 (mask active), light background → 0 (mask inactive)
+        # Convert to grayscale first
+        img = img.convert("L")
+        # Threshold: dark icon pixels -> 255 (mask active), light background -> 0 (inactive)
         mask = img.point(lambda p: 255 if p < 128 else 0)
         mask = mask.convert("1")
 
