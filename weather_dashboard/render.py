@@ -97,7 +97,7 @@ def _load_font(path: Optional[str], size: int) -> ImageFont.FreeTypeFont:
     return ImageFont.load_default()
 
 
-def _get_font_height(font, text="Hg"):
+def _get_font_height(nt, text="Hg"):
     """
     Get the height of a font in pixels.
     Works with both old and new Pillow versions.
@@ -379,7 +379,7 @@ def render_weather(
     left_col_width = 390       # left column width (clock + hourly)
     divider_x = left_col_width + 5  # vertical separator between left/right
     right_col_x = divider_x + 10    # start of right column
-    top_section_h = 240        # height of top section (horizontal divider y)
+    top_section_h = 160        # height of top section (horizontal divider y)
     forecast_bottom = HEIGHT - 35   # bottom of forecast columns
     footer_y = HEIGHT - 18     # tiny footer at bottom
 
