@@ -379,7 +379,7 @@ def render_weather(
     left_col_width = 390       # left column width (clock + hourly)
     divider_x = left_col_width + 5  # vertical separator between left/right
     right_col_x = divider_x + 10    # start of right column
-    top_section_h = 160        # height of top section (horizontal divider y)
+    top_section_h = 320        # height of top section (horizontal divider y)
     forecast_bottom = HEIGHT - 35   # bottom of forecast columns
     footer_y = HEIGHT - 18     # tiny footer at bottom
 
