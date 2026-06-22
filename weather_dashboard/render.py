@@ -471,7 +471,7 @@ def render_weather(
     # Large weather icon (centered in right column)
     right_col_width = WIDTH - right_col_x - margin
     icon_cx = right_col_x + right_col_width // 2
-    icon_cy = y_right + 20
+    icon_cy = y_right + 40
     icon_size_large = 80
     _paste_icon(black_img, icon_name, icon_cx, icon_cy, icon_size_large)
 
@@ -541,7 +541,7 @@ def render_weather(
 
         # Forecast icon (compressed vertically by ~1/3)
         _, day_icon = _condition_label_and_icon(day.get("weather_code", 0))
-        icon_center_y = y_pos + _get_font_height(font_forecast_day) + 15
+        icon_center_y = y_pos + _get_font_height(font_forecast_day) + 20
         icon_size_medium = 30
 
         is_precip = day_icon in ("rain", "snow", "thunder")
