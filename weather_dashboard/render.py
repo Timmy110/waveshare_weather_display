@@ -97,7 +97,7 @@ def _load_font(path: Optional[str], size: int) -> ImageFont.FreeTypeFont:
     return ImageFont.load_default()
 
 
-def _get_font_height(nt, text="Hg"):
+def _get_font_height(font, text="Hg"):
     """
     Get the height of a font in pixels.
     Works with both old and new Pillow versions.
