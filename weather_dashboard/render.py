@@ -376,7 +376,7 @@ def render_weather(
 
     # --- LAYOUT CONSTANTS ---------------------------------------------------
     margin = 15
-    left_col_width = 600       # left column width (clock + hourly)
+    left_col_width = 560       # left column width (clock + hourly)
     divider_x = left_col_width + 5  # vertical separator between left/right
     right_col_x = divider_x + 10    # start of right column
     top_section_h = 320        # height of top section (horizontal divider y)
@@ -424,10 +424,10 @@ def render_weather(
 
     # Anchor the hourly strip snug against the horizontal divider (only 4px gap)
     hourly_bottom = top_section_h - 4
-    y_hourly_top = hourly_bottom - hourly_column_height - 5
+    y_hourly_top = hourly_bottom - hourly_column_height - 0
 
     # Draw "HOURLY" label just above the anchored hourly strip items
-    y_hourly_label = y_hourly_top - _get_font_height(font_hourly_time) - 22
+    y_hourly_label = y_hourly_top - _get_font_height(font_hourly_time) - 20
     draw_b.text((margin, y_hourly_label), "HOURLY", font=font_hourly_time, fill=COLOR_BLACK)
 
     # Calculate spacing for hourly items
