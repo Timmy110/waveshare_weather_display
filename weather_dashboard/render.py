@@ -70,8 +70,10 @@ _icon_cache: Dict[str, Dict[int, Image.Image]] = {}
 
 def _default_font_path() -> Optional[str]:
     """Try common locations for a TrueType Collection / font file."""
+    here = os.path.dirname(os.path.abspath(__file__))
     candidates = [
-        os.path.join(os.path.dirname(__file__), "..", "pic", "Font.ttc"),
+        os.path.join(here, "..", "resources", "pic", "Font.ttc"),
+        os.path.join(here, "..", "resources", "pic", "Font.ttf"),
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/TTF/DejaVuSans.ttf",
         "/usr/share/fonts/dejavu/DejaVuSans.ttf",
@@ -170,7 +172,7 @@ def _load_icon_mask(icon_name: str, size: int) -> Optional[Image.Image]:
         return None
 
     here = os.path.dirname(os.path.abspath(__file__))
-    icon_dir = os.path.join(here, "..", "icons")
+    icon_dir = os.path.join(here, "..", "resources", "icons")
     icon_path = os.path.join(icon_dir, filename)
 
     if not os.path.isfile(icon_path):
@@ -377,10 +379,9 @@ def render_weather(
     left_col_width = 390       # left column width (clock + hourly)
     divider_x = left_col_width + 5  # vertical separator between left/right
     right_col_x = divider_x + 10    # start of right column
-    top_section_h = 240        # height of top section
-    forecast_top = top_section_h + 20
-    forecast_bottom = HEIGHT - 30
-    footer_y = HEIGHT - 18     # even smaller footer
+    top_section_h = 240        # height of top section (horizontal divider y)
+    forecast_bottom = HEIGHT - 35   # bottom of forecast columns
+    footer_y = HEIGHT - 18     # tiny footer at bottom
 
     # ========================================================================
     # TOP LEFT: CLOCK (top-aligned)
@@ -425,8 +426,8 @@ def render_weather(
     hourly_bottom = top_section_h - 10
     y_hourly_top = hourly_bottom - hourly_column_height - 10  # 10px padding above icons
 
-    # Draw "HOURLY" label just below clock, above the anchored strip
-    y_hourly_label = y_after_clock + _get_font_height(font_hourly_time) + 15
+    # Draw "HOURLY" label just above the anchored hourly strip items
+    y_hourly_label = y_hourly_top - _get_font_height(font_hourly_time) - 22
     draw_b.text((margin, y_hourly_label), "HOURLY", font=font_hourly_time, fill=COLOR_BLACK)
 
     # Calculate spacing for hourly items
@@ -529,7 +530,7 @@ def render_weather(
 
     for i, day in enumerate(forecast[:5]):
         x_center = i * day_width + day_width // 2
-        y_pos = strip_top + 5
+        y_pos = strip_top + 3
         day_label = day.get("weekday", "?")
         day_high = f"{day.get('high', '?'):.0f}{unit_sym}"
         day_low = f"{day.get('low', '?'):.0f}{unit_sym}"
@@ -538,11 +539,11 @@ def render_weather(
         dw = _get_text_width(font_forecast_day, day_label)
         draw_b.text((x_center - dw // 2, y_pos), day_label, font=font_forecast_day, fill=COLOR_BLACK)
 
-        # Forecast icon
+        # Forecast icon (smaller, tighter spacing to shrink section ~1/3)
         _, day_icon = _condition_label_and_icon(day.get("weather_code", 0))
-        icon_center_y = y_pos + _get_font_height(font_forecast_day) + 30
-        icon_size_medium = 40
-        
+        icon_center_y = y_pos + _get_font_height(font_forecast_day) + 18
+        icon_size_medium = 28
+
         is_precip = day_icon in ("rain", "snow", "thunder")
         if is_precip:
             # Red icons for precipitation days (uses special red buffer)
@@ -551,12 +552,12 @@ def render_weather(
             _paste_icon(black_img, day_icon, x_center, icon_center_y, icon_size_medium)
 
         # High temp (red accent) below icon
-        hi_y = icon_center_y + icon_size_medium // 2 + 5
+        hi_y = icon_center_y + icon_size_medium // 2 + 3
         hi_w = _get_text_width(font_forecast_temp, day_high)
         draw_r.text((x_center - hi_w // 2, hi_y), day_high, font=font_forecast_temp, fill=COLOR_RED)
 
         # Low temp below high
-        lo_y = hi_y + _get_font_height(font_forecast_temp) + 5
+        lo_y = hi_y + _get_font_height(font_forecast_temp) + 3
         lo_w = _get_text_width(font_forecast_temp, day_low)
         draw_b.text((x_center - lo_w // 2, lo_y), day_low, font=font_forecast_temp, fill=COLOR_BLACK)
 

@@ -162,7 +162,7 @@ def main() -> int:
 
         # Step 3 — Render images
         font_path = cfg.get("font_path") or os.path.join(
-            os.path.dirname(__file__), "pic", "Font.ttc"
+            os.path.dirname(__file__), "resources", "pic", "Font.ttc"
         )
         black_img, red_img = render_weather(weather, font_path=font_path, stale=stale_mode)
 
