@@ -376,7 +376,7 @@ def render_weather(
 
     # --- LAYOUT CONSTANTS ---------------------------------------------------
     margin = 15
-    left_col_width = 390       # left column width (clock + hourly)
+    left_col_width = 600       # left column width (clock + hourly)
     divider_x = left_col_width + 5  # vertical separator between left/right
     right_col_x = divider_x + 10    # start of right column
     top_section_h = 320        # height of top section (horizontal divider y)
