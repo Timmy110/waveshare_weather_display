@@ -342,10 +342,10 @@ def render_weather(
     
     # Font sizes
     if font_path and os.path.isfile(font_path):
-        font_clock = _load_font(font_path, 96)          # clock display (larger)
-        font_temp_large = _load_font(font_path, 84)     # current temperature (larger)
-        font_icon_label = _load_font(font_path, 36)     # condition text (larger)
-        font_detail = _load_font(font_path, 28)         # wind, feels like, etc (larger)
+        font_clock = _load_font(font_path, 96)          # clock display
+        font_temp_large = _load_font(font_path, 72)     # current temperature
+        font_icon_label = _load_font(font_path, 30)     # condition text
+        font_detail = _load_font(font_path, 24)         # wind, feels like, etc
         font_hourly_temp = _load_font(font_path, 24)    # hourly temps
         font_hourly_time = _load_font(font_path, 20)    # hourly time labels
         font_forecast_day = _load_font(font_path, 24)   # day names in forecast
@@ -422,9 +422,9 @@ def render_weather(
                             15 +                                   # spacing
                             _get_font_height(font_hourly_temp))    # temp
 
-    # Anchor the hourly strip right above the horizontal divider
-    hourly_bottom = top_section_h - 10
-    y_hourly_top = hourly_bottom - hourly_column_height - 10  # 10px padding above icons
+    # Anchor the hourly strip snug against the horizontal divider (only 4px gap)
+    hourly_bottom = top_section_h - 4
+    y_hourly_top = hourly_bottom - hourly_column_height - 5
 
     # Draw "HOURLY" label just above the anchored hourly strip items
     y_hourly_label = y_hourly_top - _get_font_height(font_hourly_time) - 22
@@ -524,13 +524,13 @@ def render_weather(
     # ========================================================================
     forecast = weather.get("forecast", [])
 
-    strip_top = sep_y + 15
+    strip_top = sep_y + 8
     num_days = len(forecast) if forecast else 0
     day_width = WIDTH // max(num_days, 1)
 
     for i, day in enumerate(forecast[:5]):
         x_center = i * day_width + day_width // 2
-        y_pos = strip_top + 3
+        y_pos = strip_top + 2
         day_label = day.get("weekday", "?")
         day_high = f"{day.get('high', '?'):.0f}{unit_sym}"
         day_low = f"{day.get('low', '?'):.0f}{unit_sym}"
@@ -539,10 +539,10 @@ def render_weather(
         dw = _get_text_width(font_forecast_day, day_label)
         draw_b.text((x_center - dw // 2, y_pos), day_label, font=font_forecast_day, fill=COLOR_BLACK)
 
-        # Forecast icon (smaller, tighter spacing to shrink section ~1/3)
+        # Forecast icon (compressed vertically by ~1/3)
         _, day_icon = _condition_label_and_icon(day.get("weather_code", 0))
-        icon_center_y = y_pos + _get_font_height(font_forecast_day) + 18
-        icon_size_medium = 28
+        icon_center_y = y_pos + _get_font_height(font_forecast_day) + 10
+        icon_size_medium = 20
 
         is_precip = day_icon in ("rain", "snow", "thunder")
         if is_precip:
@@ -552,12 +552,12 @@ def render_weather(
             _paste_icon(black_img, day_icon, x_center, icon_center_y, icon_size_medium)
 
         # High temp (red accent) below icon
-        hi_y = icon_center_y + icon_size_medium // 2 + 3
+        hi_y = icon_center_y + icon_size_medium // 2 + 2
         hi_w = _get_text_width(font_forecast_temp, day_high)
         draw_r.text((x_center - hi_w // 2, hi_y), day_high, font=font_forecast_temp, fill=COLOR_RED)
 
-        # Low temp below high
-        lo_y = hi_y + _get_font_height(font_forecast_temp) + 3
+        # Low temp below high (tighter gap)
+        lo_y = hi_y + _get_font_height(font_forecast_temp) + 1
         lo_w = _get_text_width(font_forecast_temp, day_low)
         draw_b.text((x_center - lo_w // 2, lo_y), day_low, font=font_forecast_temp, fill=COLOR_BLACK)
 
