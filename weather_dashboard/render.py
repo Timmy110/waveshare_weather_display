@@ -340,15 +340,15 @@ def render_weather(
     
     # Font sizes
     if font_path and os.path.isfile(font_path):
-        font_clock = _load_font(font_path, 78)          # clock display
-        font_temp_large = _load_font(font_path, 72)     # current temperature
-        font_icon_label = _load_font(font_path, 32)     # condition text
-        font_detail = _load_font(font_path, 24)         # wind, feels like, etc
-        font_hourly_temp = _load_font(font_path, 22)    # hourly temps
-        font_hourly_time = _load_font(font_path, 18)    # hourly time labels
+        font_clock = _load_font(font_path, 96)          # clock display (larger)
+        font_temp_large = _load_font(font_path, 84)     # current temperature (larger)
+        font_icon_label = _load_font(font_path, 36)     # condition text (larger)
+        font_detail = _load_font(font_path, 28)         # wind, feels like, etc (larger)
+        font_hourly_temp = _load_font(font_path, 24)    # hourly temps
+        font_hourly_time = _load_font(font_path, 20)    # hourly time labels
         font_forecast_day = _load_font(font_path, 24)   # day names in forecast
         font_forecast_temp = _load_font(font_path, 22)  # forecast temps
-        font_footer = _load_font(font_path, 16)         # footer text
+        font_footer = _load_font(font_path, 14)         # footer text (smaller)
     else:
         font_clock = _load_font(None, 36)
         font_temp_large = _load_font(None, 48)
@@ -379,11 +379,11 @@ def render_weather(
     right_col_x = divider_x + 10    # start of right column
     top_section_h = 240        # height of top section
     forecast_top = top_section_h + 20
-    forecast_bottom = HEIGHT - 35
-    footer_y = HEIGHT - 22     # smaller footer
+    forecast_bottom = HEIGHT - 30
+    footer_y = HEIGHT - 18     # even smaller footer
 
     # ========================================================================
-    # TOP LEFT: CLOCK
+    # TOP LEFT: CLOCK (top-aligned)
     # ========================================================================
     y_clock = margin + 5
 
@@ -404,21 +404,32 @@ def render_weather(
         date_display = now_dt.strftime("%a, %b %d")
 
     draw_b.text((margin, y_clock), clock_display, font=font_clock, fill=COLOR_BLACK)
-    draw_b.text((margin, y_clock + _get_font_height(font_clock) + 5), date_display,
+    y_after_clock = y_clock + _get_font_height(font_clock) + 5
+    draw_b.text((margin, y_after_clock), date_display,
                 font=font_hourly_time, fill=COLOR_BLACK)
 
     # ========================================================================
-    # TOP LEFT (below clock): HOURLY FORECAST STRIP
+    # TOP LEFT (below clock): HOURLY FORECAST STRIP (bottom-anchored)
     # ========================================================================
     hourly_forecast = weather.get("hourly_forecast", [])
-    y_hourly_start = y_clock + _get_font_height(font_clock) + _get_font_height(font_hourly_time) + 20
+    num_hours = len(hourly_forecast) if hourly_forecast else 0
 
-    # Draw "HOURLY" label
-    draw_b.text((margin, y_hourly_start), "HOURLY", font=font_hourly_time, fill=COLOR_BLACK)
-    y_hourly_start += _get_font_height(font_hourly_time) + 5
+    # Calculate total height of one hourly column (time + icon + temp)
+    hourly_column_height = (_get_font_height(font_hourly_time) +   # time label
+                            15 +                                   # spacing
+                            20 +                                   # icon size
+                            15 +                                   # spacing
+                            _get_font_height(font_hourly_temp))    # temp
+
+    # Anchor the hourly strip right above the horizontal divider
+    hourly_bottom = top_section_h - 10
+    y_hourly_top = hourly_bottom - hourly_column_height - 10  # 10px padding above icons
+
+    # Draw "HOURLY" label just below clock, above the anchored strip
+    y_hourly_label = y_after_clock + _get_font_height(font_hourly_time) + 15
+    draw_b.text((margin, y_hourly_label), "HOURLY", font=font_hourly_time, fill=COLOR_BLACK)
 
     # Calculate spacing for hourly items
-    num_hours = len(hourly_forecast) if hourly_forecast else 0
     if num_hours > 0:
         available_width = left_col_width - margin * 2
         hour_block_width = max(available_width // num_hours, 40)
@@ -431,24 +442,24 @@ def render_weather(
         hour_temp = f"{hour_data.get('temperature', '?'):.0f}"
         _, hour_icon = _condition_label_and_icon(hour_data.get("weather_code", 0))
 
-        # Time label
-        time_text = hour_label
-        tw = _get_text_width(font_hourly_time, time_text)
-        draw_b.text((x_base + (hour_block_width - tw) // 2, y_hourly_start),
-                    time_text, font=font_hourly_time, fill=COLOR_BLACK)
-
-        # Icon (centered in block)
-        icon_center_y = y_hourly_start + _get_font_height(font_hourly_time) + 15
-        icon_size = 20
         cx = x_base + hour_block_width // 2
+
+        # Icon (centered at anchored position)
+        icon_center_y = y_hourly_top + (_get_font_height(font_hourly_time) // 2)
+        icon_size = 24
         if not _paste_icon(black_img, hour_icon, cx, icon_center_y, icon_size):
-            # Fallback: draw a simple dot if icon fails
             black_img.putpixel((cx, icon_center_y), COLOR_BLACK)
 
+        # Time label above icon
+        time_text = hour_label
+        tw = _get_text_width(font_hourly_time, time_text)
+        draw_b.text((x_base + (hour_block_width - tw) // 2, y_hourly_top - _get_font_height(font_hourly_time) - 4),
+                    time_text, font=font_hourly_time, fill=COLOR_BLACK)
+
         # Temperature below icon
-        temp_text = f"{hour_temp}°"
+        temp_text = f"{hour_temp}\u00b0"
         tpw = _get_text_width(font_hourly_temp, temp_text)
-        draw_b.text((x_base + (hour_block_width - tpw) // 2, icon_center_y + icon_size),
+        draw_b.text((x_base + (hour_block_width - tpw) // 2, icon_center_y + icon_size // 2 + 4),
                     temp_text, font=font_hourly_temp, fill=COLOR_BLACK)
 
     # ========================================================================
