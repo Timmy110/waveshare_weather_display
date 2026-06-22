@@ -541,7 +541,7 @@ def render_weather(
 
         # Forecast icon (compressed vertically by ~1/3)
         _, day_icon = _condition_label_and_icon(day.get("weather_code", 0))
-        icon_center_y = y_pos + _get_font_height(font_forecast_day) + 10
+        icon_center_y = y_pos + _get_font_height(font_forecast_day) + 5
         icon_size_medium = 30
 
         is_precip = day_icon in ("rain", "snow", "thunder")
