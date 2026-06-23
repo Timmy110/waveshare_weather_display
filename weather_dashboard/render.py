@@ -427,7 +427,7 @@ def render_weather(
     y_hourly_top = hourly_bottom - hourly_column_height + 30
 
     # Draw "HOURLY" label just above the anchored hourly strip items
-    y_hourly_label = y_hourly_top - _get_font_height(font_hourly_time) - 10
+    y_hourly_label = y_hourly_top - _get_font_height(font_hourly_time) - 30
     draw_b.text((margin, y_hourly_label), "HOURLY", font=font_hourly_time, fill=COLOR_BLACK)
 
     # Calculate spacing for hourly items
