@@ -404,7 +404,10 @@ def render_weather(
         clock_display = now_dt.strftime("%H:%M")
         date_display = now_dt.strftime("%a, %b %d")
 
-    draw_b.text((margin, y_clock), clock_display, font=font_clock, fill=COLOR_BLACK)
+    # Center the clock within the left column
+    clock_width = _get_text_width(font_clock, clock_display)
+    clock_x = margin + (left_col_width - clock_width) // 2
+    draw_b.text((clock_x, y_clock), clock_display, font=font_clock, fill=COLOR_BLACK)
     y_after_clock = y_clock + _get_font_height(font_clock) + 5
     draw_b.text((margin, y_after_clock), date_display,
                 font=font_hourly_time, fill=COLOR_BLACK)
@@ -429,6 +432,14 @@ def render_weather(
     # Draw "HOURLY" label just above the anchored hourly strip items
     y_hourly_label = y_hourly_top - _get_font_height(font_hourly_time) - 30
     draw_b.text((margin, y_hourly_label), "HOURLY", font=font_hourly_time, fill=COLOR_BLACK)
+
+    # Check for upcoming bad weather and display warning in red
+    from weather_dashboard.weather import get_upcoming_bad_weather
+    bad_weather = get_upcoming_bad_weather(weather, max_hours_ahead=2)
+    if bad_weather:
+        minutes = bad_weather["minutes"]
+        bw_text = f"{bad_weather['type']} in {minutes} min ({bad_weather['time']})"
+        draw_r.text((margin + 5, y_hourly_label), bw_text, font=font_hourly_time, fill=COLOR_RED)
 
     # Calculate spacing for hourly items
     if num_hours > 0:
@@ -507,6 +518,42 @@ def render_weather(
     feels_width = _get_text_width(font_detail, feels_str)
     feels_x = right_col_x + (right_col_width - feels_width) // 2
     draw_b.text((feels_x, feels_y), feels_str, font=font_detail, fill=COLOR_BLACK)
+
+    # Sunrise / Sunset (contextual: only show when relevant)
+    sunrise_time = weather.get("sunrise")
+    sunset_time = weather.get("sunset")
+    sun_y = feels_y + _get_font_height(font_detail) + 5
+
+    # Parse current local time for comparison
+    cur_hour_min = None
+    if now_dt:
+        cur_hour_min = now_dt.hour * 60 + now_dt.minute
+
+    if sunrise_time and sunset_time and cur_hour_min is not None:
+        lines = []
+        # Show sunrise if within ~90 min after it occurred
+        try:
+            sr_h, sr_m = map(int, sunrise_time.split(":"))
+            sr_minutes = sr_h * 60 + sr_m
+            if abs(cur_hour_min - sr_minutes) <= 90:
+                lines.append(f"Sunrise {sunrise_time}")
+        except (ValueError, AttributeError):
+            pass
+
+        # Show sunset if within ~90 min before it occurs
+        try:
+            ss_h, ss_m = map(int, sunset_time.split(":"))
+            ss_minutes = ss_h * 60 + ss_m
+            if 0 <= (ss_minutes - cur_hour_min) <= 90:
+                lines.append(f"Sunset {sunset_time}")
+        except (ValueError, AttributeError):
+            pass
+
+        for line in lines:
+            lw = _get_text_width(font_detail, line)
+            lx = right_col_x + (right_col_width - lw) // 2
+            draw_b.text((lx, sun_y), line, font=font_detail, fill=COLOR_BLACK)
+            sun_y += _get_font_height(font_detail) + 3
 
     # ========================================================================
     # SEPARATORS

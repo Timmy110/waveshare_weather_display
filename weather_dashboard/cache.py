@@ -73,10 +73,13 @@ def weather_data_hash(weather: Dict[str, Any]) -> str:
             "weather_code": weather.get("current", {}).get("weather_code"),
             "feels_like": weather.get("current", {}).get("feels_like"),
             "wind_speed": weather.get("current", {}).get("wind_speed"),
+            "local_time": weather.get("current", {}).get("local_time"),
         },
         "hourly_forecast": weather.get("hourly_forecast", []),
         "today_high": weather.get("today_high"),
         "today_low": weather.get("today_low"),
+        "sunrise": weather.get("sunrise"),
+        "sunset": weather.get("sunset"),
         "forecast": weather.get("forecast", []),
     }
     raw = json.dumps(snapshot, sort_keys=True)

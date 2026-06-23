@@ -34,7 +34,7 @@ def fetch_weather(
         "timezone": timezone,
         "current": "temperature,relative_humidity_2m,apparent_temperature,wind_speed_10m,weather_code",
         "hourly": "temperature,weather_code",
-        "daily": "weather_code,temperature_2m_max,temperature_2m_min",
+        "daily": "weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset",
         "temperature_unit": unit,
         # We want today + 5 more days = 6 days from API (skip today for 5 forecast days)
         "forecast_days": 6,
@@ -65,6 +65,94 @@ def fetch_weather(
         result["current"]["weather_code"],
     )
     return result
+
+
+# WMO weather codes that indicate "bad weather" (precipitation/thunder)
+BAD_WEATHER_CODES = {
+    51: "Light drizzle",
+    53: "Moderate drizzle",
+    55: "Dense drizzle",
+    56: "Freezing drizzle",
+    57: "Dense freezing drizzle",
+    61: "Slight rain",
+    63: "Moderate rain",
+    65: "Heavy rain",
+    66: "Freezing rain",
+    67: "Heavy freezing rain",
+    71: "Slight snow",
+    73: "Moderate snow",
+    75: "Heavy snow",
+    77: "Snow grains",
+    80: "Slight showers",
+    81: "Moderate showers",
+    82: "Violent showers",
+    85: "Slight snow showers",
+    86: "Heavy snow showers",
+    95: "Thunderstorm",
+    96: "Thunderstorm with hail",
+    99: "Severe thunderstorm",
+}
+
+
+def get_upcoming_bad_weather(
+    weather: Dict[str, Any],
+    max_hours_ahead: int = 2,
+) -> Optional[Dict[str, Any]]:
+    """
+    Check hourly forecast for bad weather within the next `max_hours_ahead` hours.
+
+    Returns None if no bad weather expected, otherwise a dict like:
+        {
+            "type": "Rain",           # human-readable type (title case)
+            "minutes": 25,           # minutes until it starts
+            "time": "18:35",         # HH:MM when it starts
+        }
+    """
+    hourly = weather.get("hourly_forecast", [])
+    if not hourly:
+        return None
+
+    now_str = weather.get("current", {}).get("local_time")
+    if not now_str:
+        return None
+
+    try:
+        now_dt = datetime.fromisoformat(now_str)
+    except (ValueError, TypeError):
+        return None
+
+    for hour_data in hourly:
+        hour_str = hour_data.get("hour", "")
+        code = hour_data.get("weather_code", 0)
+
+        if code not in BAD_WEATHER_CODES:
+            continue
+
+        try:
+            hour_dt = datetime.strptime(hour_str, "%H:%M")
+            # Build full datetime for comparison (same date as now)
+            hour_full = hour_dt.replace(
+                year=now_dt.year, month=now_dt.month, day=now_dt.day
+            )
+            # If hour is before now, assume it's tomorrow -> skip
+            if hour_full < now_dt:
+                continue
+
+            diff = hour_full - now_dt
+            total_minutes = int(diff.total_seconds() / 60)
+
+            if total_minutes <= max_hours_ahead * 60:
+                # Capitalize the first letter of the weather type
+                weather_type = BAD_WEATHER_CODES[code]
+                return {
+                    "type": weather_type.capitalize(),
+                    "minutes": total_minutes,
+                    "time": hour_str,
+                }
+        except (ValueError, TypeError):
+            continue
+
+    return None
 
 
 def _parse_openmeto_response(data: Dict[str, Any], unit: str) -> Dict[str, Any]:
@@ -124,6 +212,22 @@ def _parse_openmeto_response(data: Dict[str, Any], unit: str) -> Dict[str, Any]:
             "low": daily["temperature_2m_min"][i],
         })
 
+    # Parse today's sunrise/sunset times
+    sunrise_str = daily.get("sunrise", [None])[0]
+    sunset_str = daily.get("sunset", [None])[0]
+    sunrise_dt = None
+    sunset_dt = None
+    if sunrise_str:
+        try:
+            sunrise_dt = datetime.strptime(sunrise_str, "%Y-%m-%dT%H:%M")
+        except (ValueError, IndexError):
+            pass
+    if sunset_str:
+        try:
+            sunset_dt = datetime.strptime(sunset_str, "%Y-%m-%dT%H:%M")
+        except (ValueError, IndexError):
+            pass
+
     result = {
         "current": {
             "temperature": current["temperature"],
@@ -135,6 +239,8 @@ def _parse_openmeto_response(data: Dict[str, Any], unit: str) -> Dict[str, Any]:
         "hourly_forecast": hourly_forecast,
         "today_high": daily["temperature_2m_max"][0],
         "today_low": daily["temperature_2m_min"][0],
+        "sunrise": sunrise_dt.strftime("%H:%M") if sunrise_dt else None,
+        "sunset": sunset_dt.strftime("%H:%M") if sunset_dt else None,
         "forecast": forecast,
         "unit": unit,
     }
