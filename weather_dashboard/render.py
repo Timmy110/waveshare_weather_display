@@ -424,7 +424,7 @@ def render_weather(
 
     # Anchor the hourly strip snug against the horizontal divider (only 4px gap)
     hourly_bottom = top_section_h - 4
-    y_hourly_top = hourly_bottom - hourly_column_height - 0
+    y_hourly_top = hourly_bottom - hourly_column_height + 10
 
     # Draw "HOURLY" label just above the anchored hourly strip items
     y_hourly_label = y_hourly_top - _get_font_height(font_hourly_time) - 20
@@ -489,21 +489,21 @@ def render_weather(
 
     # Hi / Lo for today
     hi_lo_str = f"Hi {weather['today_high']:.0f}{unit_sym}   Lo {weather['today_low']:.0f}{unit_sym}"
-    hilo_y = cond_y + _get_font_height(font_icon_label) + 15
+    hilo_y = cond_y + _get_font_height(font_icon_label) + 8
     hilo_width = _get_text_width(font_detail, hi_lo_str)
     hilo_x = right_col_x + (right_col_width - hilo_width) // 2
     draw_b.text((hilo_x, hilo_y), hi_lo_str, font=font_detail, fill=COLOR_BLACK)
 
     # Wind speed
     wind_str = f"Wind: {cur['wind_speed']:.0f} km/h"
-    wind_y = hilo_y + _get_font_height(font_detail) + 10
+    wind_y = hilo_y + _get_font_height(font_detail) + 5
     wind_width = _get_text_width(font_detail, wind_str)
     wind_x = right_col_x + (right_col_width - wind_width) // 2
     draw_b.text((wind_x, wind_y), wind_str, font=font_detail, fill=COLOR_BLACK)
 
     # Feels like
     feels_str = f"Feels like: {cur['feels_like']:.0f}{unit_sym}"
-    feels_y = wind_y + _get_font_height(font_detail) + 10
+    feels_y = wind_y + _get_font_height(font_detail) + 5
     feels_width = _get_text_width(font_detail, feels_str)
     feels_x = right_col_x + (right_col_width - feels_width) // 2
     draw_b.text((feels_x, feels_y), feels_str, font=font_detail, fill=COLOR_BLACK)

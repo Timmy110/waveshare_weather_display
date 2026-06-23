@@ -100,8 +100,8 @@ def _parse_openmeto_response(data: Dict[str, Any], unit: str) -> Dict[str, Any]:
                 start_idx = i
                 break
 
-        # Take up to 8 hourly slots from that point
-        for i in range(start_idx, min(start_idx + 8, len(hourly["time"]))):
+        # Take up to 8 hourly slots starting from next hour (skip current)
+        for i in range(start_idx + 1, min(start_idx + 9, len(hourly["time"]))):
             t_str = hourly["time"][i]
             h_dt = datetime.strptime(t_str, "%Y-%m-%dT%H:%M")
             hourly_forecast.append({
