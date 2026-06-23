@@ -1,0 +1,10 @@
+{
+    "latitude": 50.8477,
+    "longitude": 4.3494,
+    "timezone": "Europe/Brussels",
+    "temperature_unit": "celsius",
+    "cache_dir": "~/.weather_dashboard",
+    "full_refresh_interval": 24,
+    "api_timeout_seconds": 10,
+    "font_path": null
+}

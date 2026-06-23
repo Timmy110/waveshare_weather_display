@@ -1,0 +1,25 @@
+# Git Ignore for waveshare-weather
+
+# User configuration (contains location settings)
+config.yaml
+config.yml
+
+# Requirements specification (local document)
+requirements.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Logs
+logs/
+*.log
+
+# Virtual environment
+.venv/
+venv/
+config.json
+lib/waveshare_epd/examply.py
