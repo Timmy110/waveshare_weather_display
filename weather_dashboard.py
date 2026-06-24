@@ -77,6 +77,23 @@ def _write_debug_images(black_img, red_img, cache_dir: str):
     logger.info("Backup image saved: %s, %s", bpath, rpath)
 
 
+def _image_to_partial_buffer(image):
+    """
+    Convert a mode '1' PIL image (any size) to a raw byte array for partial display.
+
+    Mirrors epd.getbuffer() logic but without the full-screen dimension check,
+    so it works for cropped region images used with display_Partial().
+
+    Returns bytearray of length (width // 8) * height.
+    """
+    img = image.convert("1")
+    buf = bytearray(img.tobytes("raw"))
+    # Invert bytes: PIL uses 0=black, e-paper uses 1=black (0=white).
+    for i in range(len(buf)):
+        buf[i] ^= 0xFF
+    return buf
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -197,7 +214,7 @@ def main() -> int:
             init_called = True
 
             logger.info("Partial clock refresh (~1s) ...")
-            clk_buf = epd.getbuffer(clk_black)
+            clk_buf = _image_to_partial_buffer(clk_black)
             epd.display_Partial(clk_buf, rx, ry, rx2, ry2)
             logger.info("Partial update complete")
 
