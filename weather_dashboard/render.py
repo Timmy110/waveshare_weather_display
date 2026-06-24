@@ -489,6 +489,36 @@ def render_weather(
     draw_b.text((date_x, y_after_clock), date_display,
                 font=font_hourly_time, fill=COLOR_BLACK)
 
+    # Sunrise / Sunset below date (contextual)
+    sunrise_time = weather.get("sunrise")
+    sunset_time = weather.get("sunset")
+    sun_y = y_after_clock + _get_font_height(font_hourly_time) + 10
+    cur_hour_min = None
+    if now_dt:
+        cur_hour_min = now_dt.hour * 60 + now_dt.minute
+
+    if sunrise_time and sunset_time and cur_hour_min is not None:
+        sun_lines = []
+        try:
+            sr_h, sr_m = map(int, sunrise_time.split(":"))
+            sr_minutes = sr_h * 60 + sr_m
+            if abs(cur_hour_min - sr_minutes) <= 90:
+                sun_lines.append(f"Sunrise {sunrise_time}")
+        except (ValueError, AttributeError):
+            pass
+        try:
+            ss_h, ss_m = map(int, sunset_time.split(":"))
+            ss_minutes = ss_h * 60 + ss_m
+            if 0 <= (ss_minutes - cur_hour_min) <= 90:
+                sun_lines.append(f"Sunset {sunset_time}")
+        except (ValueError, AttributeError):
+            pass
+        for line in sun_lines:
+            lw = _get_text_width(font_hourly_time, line)
+            lx = margin + (left_col_width - lw) // 2
+            draw_b.text((lx, sun_y), line, font=font_hourly_time, fill=COLOR_BLACK)
+            sun_y += _get_font_height(font_hourly_time) + 3
+
     # ========================================================================
     # TOP LEFT (below clock): HOURLY FORECAST STRIP (bottom-anchored)
     # ========================================================================
@@ -595,42 +625,6 @@ def render_weather(
     feels_width = _get_text_width(font_detail, feels_str)
     feels_x = right_col_x + (right_col_width - feels_width) // 2
     draw_b.text((feels_x, feels_y), feels_str, font=font_detail, fill=COLOR_BLACK)
-
-    # Sunrise / Sunset (contextual: only show when relevant)
-    sunrise_time = weather.get("sunrise")
-    sunset_time = weather.get("sunset")
-    sun_y = feels_y + _get_font_height(font_detail) + 5
-
-    # Parse current local time for comparison
-    cur_hour_min = None
-    if now_dt:
-        cur_hour_min = now_dt.hour * 60 + now_dt.minute
-
-    if sunrise_time and sunset_time and cur_hour_min is not None:
-        lines = []
-        # Show sunrise if within ~90 min after it occurred
-        try:
-            sr_h, sr_m = map(int, sunrise_time.split(":"))
-            sr_minutes = sr_h * 60 + sr_m
-            if abs(cur_hour_min - sr_minutes) <= 90:
-                lines.append(f"Sunrise {sunrise_time}")
-        except (ValueError, AttributeError):
-            pass
-
-        # Show sunset if within ~90 min before it occurs
-        try:
-            ss_h, ss_m = map(int, sunset_time.split(":"))
-            ss_minutes = ss_h * 60 + ss_m
-            if 0 <= (ss_minutes - cur_hour_min) <= 90:
-                lines.append(f"Sunset {sunset_time}")
-        except (ValueError, AttributeError):
-            pass
-
-        for line in lines:
-            lw = _get_text_width(font_detail, line)
-            lx = right_col_x + (right_col_width - lw) // 2
-            draw_b.text((lx, sun_y), line, font=font_detail, fill=COLOR_BLACK)
-            sun_y += _get_font_height(font_detail) + 3
 
     # ========================================================================
     # SEPARATORS
