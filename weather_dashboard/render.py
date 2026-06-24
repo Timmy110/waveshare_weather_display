@@ -410,6 +410,7 @@ def render_weather(
     font_path: Optional[str] = None,
     stale: bool = False,
     timezone_str: str = "Europe/Paris",
+    city_name: Optional[str] = None,
 ) -> Tuple[Image.Image, Image.Image]:
     """
     Render a complete weather dashboard image pair (black_buffer, red_buffer).
@@ -484,9 +485,15 @@ def render_weather(
     clock_x = margin + (left_col_width - clock_width) // 2
     draw_b.text((clock_x, y_clock), clock_display, font=font_clock, fill=COLOR_BLACK)
     y_after_clock = y_clock + _get_font_height(font_clock) + 5
-    date_width = _get_text_width(font_hourly_time, date_display)
+
+    # Build date line, optionally with city name
+    if city_name:
+        date_line = f"{date_display} — {city_name}"
+    else:
+        date_line = date_display
+    date_width = _get_text_width(font_hourly_time, date_line)
     date_x = margin + (left_col_width - date_width) // 2
-    draw_b.text((date_x, y_after_clock), date_display,
+    draw_b.text((date_x, y_after_clock), date_line,
                 font=font_hourly_time, fill=COLOR_BLACK)
 
     # Sunrise / Sunset below date (contextual)

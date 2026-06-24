@@ -3,6 +3,7 @@
     "longitude": 4.3494,
     "timezone": "Europe/Brussels",
     "temperature_unit": "celsius",
+    "city_name": "Brussels",
     "cache_dir": "~/.weather_dashboard",
     "full_refresh_interval": 24,
     "api_timeout_seconds": 10,

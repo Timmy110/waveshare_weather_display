@@ -109,6 +109,7 @@ def main() -> int:
         os.path.dirname(__file__), "resources", "pic", "Font.ttc"
     )
     timezone_str = cfg["timezone"]
+    city_name = cfg.get("city_name")
 
     epd = None
     init_called = False
@@ -160,7 +161,7 @@ def main() -> int:
 
             # Step 3 — Render full images
             black_img, red_img = render_weather(
-                weather, font_path=font_path, stale=stale_mode, timezone_str=timezone_str
+                weather, font_path=font_path, stale=stale_mode, timezone_str=timezone_str, city_name=city_name
             )
 
             # Step 4 — Full display update (~15-20s)
@@ -186,7 +187,7 @@ def main() -> int:
 
             # Re-render with live clock time (not stale API snapshot)
             black_img, red_img = render_weather(
-                weather, font_path=font_path, stale=stale_mode, timezone_str=timezone_str
+                weather, font_path=font_path, stale=stale_mode, timezone_str=timezone_str, city_name=city_name
             )
 
             epd = epd7in5b_V2.EPD()
