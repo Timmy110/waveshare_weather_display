@@ -160,7 +160,7 @@ def main() -> int:
 
             # Step 3 — Render full images
             black_img, red_img = render_weather(
-                weather, font_path=font_path, stale=stale_mode
+                weather, font_path=font_path, stale=stale_mode, timezone_str=timezone_str
             )
 
             # Step 4 — Full display update (~15-20s)
@@ -186,7 +186,7 @@ def main() -> int:
 
             # Re-render with live clock time (not stale API snapshot)
             black_img, red_img = render_weather(
-                weather, font_path=font_path, stale=stale_mode
+                weather, font_path=font_path, stale=stale_mode, timezone_str=timezone_str
             )
 
             epd = epd7in5b_V2.EPD()

@@ -5,7 +5,7 @@ import logging
 import math
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 # zoneinfo is stdlib since Python 3.9
@@ -347,6 +347,16 @@ def _get_local_time(timezone_str: str = "Europe/Paris") -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _round_up_to_5min(dt: datetime) -> datetime:
+    """Round datetime up to the next multiple of 5 minutes."""
+    if dt.minute % 5 == 0 and dt.second == 0:
+        return dt.replace(second=0, microsecond=0)
+    new_minutes = (dt.minute // 5 + 1) * 5
+    if new_minutes >= 60:
+        return dt.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    return dt.replace(minute=new_minutes % 60, second=0, microsecond=0)
+
+
 def render_clock_region(
     timezone_str: str = "Europe/Paris",
     font_path: Optional[str] = None,
@@ -399,6 +409,7 @@ def render_weather(
     weather: Dict[str, Any],
     font_path: Optional[str] = None,
     stale: bool = False,
+    timezone_str: str = "Europe/Paris",
 ) -> Tuple[Image.Image, Image.Image]:
     """
     Render a complete weather dashboard image pair (black_buffer, red_buffer).
@@ -463,21 +474,10 @@ def render_weather(
     # ========================================================================
     y_clock = margin + 5
 
-    # Display local time from API (or fall back to UTC)
-    local_time_str = cur.get("local_time")
-    if local_time_str:
-        try:
-            now_dt = datetime.fromisoformat(local_time_str)
-            clock_display = now_dt.strftime("%H:%M")
-            date_display = now_dt.strftime("%a, %b %d")
-        except (ValueError, TypeError):
-            now_dt = datetime.now(timezone.utc)
-            clock_display = now_dt.strftime("%H:%M")
-            date_display = now_dt.strftime("%a, %b %d")
-    else:
-        now_dt = datetime.now(timezone.utc)
-        clock_display = now_dt.strftime("%H:%M")
-        date_display = now_dt.strftime("%a, %b %d")
+    # Display live local time rounded up to next 5-minute mark (update interval)
+    now_dt = _round_up_to_5min(_get_local_time(timezone_str))
+    clock_display = now_dt.strftime("%H:%M")
+    date_display = now_dt.strftime("%a, %b %d")
 
     # Center the clock within the left column
     clock_width = _get_text_width(font_clock, clock_display)
