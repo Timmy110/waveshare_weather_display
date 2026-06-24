@@ -28,7 +28,7 @@ from weather_dashboard.cache import (  # noqa: E402
     update_meta_after_run,
     write_last_weather,
 )
-from weather_dashboard.render import render_blank, render_clock_region, render_weather  # noqa: E402
+from weather_dashboard.render import render_weather  # noqa: E402
 from weather_dashboard.weather import fetch_weather  # noqa: E402
 
 logger = logging.getLogger("weather_dashboard")
@@ -75,23 +75,6 @@ def _write_debug_images(black_img, red_img, cache_dir: str):
     black_img.save(bpath)
     red_img.save(rpath)
     logger.info("Backup image saved: %s, %s", bpath, rpath)
-
-
-def _image_to_partial_buffer(image):
-    """
-    Convert a mode '1' PIL image (any size) to a raw byte array for partial display.
-
-    Mirrors epd.getbuffer() logic but without the full-screen dimension check,
-    so it works for cropped region images used with display_Partial().
-
-    Returns bytearray of length (width // 8) * height.
-    """
-    img = image.convert("1")
-    buf = bytearray(img.tobytes("raw"))
-    # Invert bytes: PIL uses 0=black, e-paper uses 1=black (0=white).
-    for i in range(len(buf)):
-        buf[i] ^= 0xFF
-    return buf
 
 
 # ---------------------------------------------------------------------------
@@ -198,28 +181,29 @@ def main() -> int:
             _write_debug_images(black_img, red_img, cache_dir)
 
         else:
-            # Weather unchanged — do a fast partial refresh of the clock only
-            logger.info("Weather unchanged (%s); doing partial clock refresh", reason)
+            # Weather unchanged — fast refresh to update the clock without ghosting
+            logger.info("Weather unchanged (%s); doing fast full-screen refresh", reason)
 
-            clk_black, clk_red, region = render_clock_region(
-                timezone_str=timezone_str, font_path=font_path
+            # Re-render with live clock time (not stale API snapshot)
+            black_img, red_img = render_weather(
+                weather, font_path=font_path, stale=stale_mode
             )
-            rx, ry, rx2, ry2 = region
 
             epd = epd7in5b_V2.EPD()
-            logger.info("Initializing e-Paper (partial refresh) ...")
-            init_result = epd.init_part()
+            logger.info("Initializing e-Paper (fast refresh) ...")
+            init_result = epd.init_Fast()
             if init_result != 0:
-                raise RuntimeError(f"epd.init_part() failed with code {init_result}")
+                raise RuntimeError(f"epd.init_Fast() failed with code {init_result}")
             init_called = True
 
-            logger.info("Partial clock refresh (~1s) ...")
-            clk_buf = _image_to_partial_buffer(clk_black)
-            epd.display_Partial(clk_buf, rx, ry, rx2, ry2)
-            logger.info("Partial update complete")
+            logger.info("Sending fast image buffers (~5-8s) ...")
+            epd.display(epd.getbuffer(black_img), epd.getbuffer(red_img))
+            logger.info("Fast refresh complete")
 
-            # Keep cache in sync (increment skip counter)
+            # Update cache + re-save backup images (clock changed)
+            write_last_weather(cache_dir, weather)
             update_meta_after_run(cache_dir, weather, did_refresh=False)
+            _write_debug_images(black_img, red_img, cache_dir)
 
     except Exception as exc:
         logger.exception("Unhandled exception during run: %s", exc)
