@@ -67,20 +67,28 @@ def weather_data_hash(weather: Dict[str, Any]) -> str:
     rendered from live system time, not the API snapshot) and unit which
     doesn't affect visual content beyond labels.
     """
-    # Build a deterministic snapshot of the displayable fields
+    # Round to match display precision (: .0f) so minor float changes
+    # don't trigger unnecessary full refreshes.
+    cur = weather.get("current", {})
     snapshot = {
         "current": {
-            "temperature": weather.get("current", {}).get("temperature"),
-            "weather_code": weather.get("current", {}).get("weather_code"),
-            "feels_like": weather.get("current", {}).get("feels_like"),
-            "wind_speed": weather.get("current", {}).get("wind_speed"),
+            "temperature": round(cur.get("temperature") or 0),
+            "weather_code": cur.get("weather_code"),
+            "feels_like": round(cur.get("feels_like") or 0),
+            "wind_speed": round(cur.get("wind_speed") or 0),
         },
-        "hourly_forecast": weather.get("hourly_forecast", []),
-        "today_high": weather.get("today_high"),
-        "today_low": weather.get("today_low"),
+        "hourly_forecast": [
+            {"hour": h.get("hour"), "temperature": round(h.get("temperature") or 0), "weather_code": h.get("weather_code")}
+            for h in weather.get("hourly_forecast", [])
+        ],
+        "today_high": round(weather.get("today_high") or 0),
+        "today_low": round(weather.get("today_low") or 0),
         "sunrise": weather.get("sunrise"),
         "sunset": weather.get("sunset"),
-        "forecast": weather.get("forecast", []),
+        "forecast": [
+            {"weekday": d.get("weekday"), "high": round(d.get("high") or 0), "low": round(d.get("low") or 0), "weather_code": d.get("weather_code")}
+            for d in weather.get("forecast", [])
+        ],
     }
     raw = json.dumps(snapshot, sort_keys=True)
     return hashlib.sha256(raw.encode()).hexdigest()
