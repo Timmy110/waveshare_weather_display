@@ -4,8 +4,18 @@
 import logging
 import math
 import os
+import sys
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
+
+# zoneinfo is stdlib since Python 3.9
+if sys.version_info >= (3, 9):
+    from zoneinfo import ZoneInfo
+else:
+    try:
+        import pytz
+    except ImportError:
+        pytz = None
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -318,6 +328,71 @@ def _condition_label_and_icon(code: int) -> Tuple[str, str]:
     """Return a human-readable condition label and icon name for a WMO code."""
     text, icon = WMO_CODES.get(code, (f"Unknown ({code})", "cloud"))
     return text, icon
+
+
+def _get_local_time(timezone_str: str = "Europe/Paris") -> datetime:
+    """Return the current local time in the configured timezone."""
+    if sys.version_info >= (3, 9):
+        try:
+            tz = ZoneInfo(timezone_str)
+            return datetime.now(tz)
+        except (KeyError, Exception):
+            pass
+    elif pytz is not None:
+        try:
+            tz = pytz.timezone(timezone_str)
+            return datetime.now(tz)
+        except (pytz.UnknownTimeZoneError, Exception):
+            pass
+    return datetime.now(timezone.utc)
+
+
+def render_clock_region(
+    timezone_str: str = "Europe/Paris",
+    font_path: Optional[str] = None,
+) -> Tuple[Image.Image, Image.Image]:
+    """
+    Render only the clock + date region for a partial e-paper refresh.
+
+    Returns cropped black and red images covering the same pixel area as the
+    full-render clock block so display_Partial() can blit it directly.
+    """
+    if font_path and os.path.isfile(font_path):
+        font_clock = _load_font(font_path, 96)
+        font_hourly_time = _load_font(font_path, 20)
+    else:
+        font_clock = _load_font(None, 36)
+        font_hourly_time = _load_font(None, 14)
+
+    now_dt = _get_local_time(timezone_str)
+    clock_display = now_dt.strftime("%H:%M")
+    date_display = now_dt.strftime("%a, %b %d")
+
+    # Region bounds matching full render layout
+    margin = 15
+    left_col_width = 560
+    y_clock = margin + 5
+    clock_height_region = _get_font_height(font_clock) + 5 + _get_font_height(font_hourly_time)
+
+    region = (margin, y_clock, margin + left_col_width, y_clock + clock_height_region)
+    rx, ry, rx2, ry2 = region
+    rw = rx2 - rx
+    rh = ry2 - ry
+
+    black_img = Image.new("1", (rw, rh), COLOR_BG)
+    red_img = Image.new("1", (rw, rh), COLOR_BG)
+    draw_b = ImageDraw.Draw(black_img)
+
+    clock_width = _get_text_width(font_clock, clock_display)
+    clock_x = (rw - clock_width) // 2
+    draw_b.text((clock_x, 0), clock_display, font=font_clock, fill=COLOR_BLACK)
+
+    y_date = _get_font_height(font_clock) + 5
+    date_width = _get_text_width(font_hourly_time, date_display)
+    date_x = (rw - date_width) // 2
+    draw_b.text((date_x, y_date), date_display, font=font_hourly_time, fill=COLOR_BLACK)
+
+    return black_img, red_img, region
 
 
 def render_weather(

@@ -28,7 +28,7 @@ from weather_dashboard.cache import (  # noqa: E402
     update_meta_after_run,
     write_last_weather,
 )
-from weather_dashboard.render import render_blank, render_weather  # noqa: E402
+from weather_dashboard.render import render_blank, render_clock_region, render_weather  # noqa: E402
 from weather_dashboard.weather import fetch_weather  # noqa: E402
 
 logger = logging.getLogger("weather_dashboard")
@@ -68,14 +68,13 @@ def load_config(path: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def _write_debug_images(black_img, red_img, cache_dir: str):
-    """Save last-rendered images to cache for debugging (optional)."""
-    import datetime
-    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    bpath = os.path.join(os.path.expanduser(cache_dir), f"last_black_{ts}.png")
-    rpath = os.path.join(os.path.expanduser(cache_dir), f"last_red_{ts}.png")
+    """Save a single backup copy of the last-rendered images (overwrites previous)."""
+    resolved = os.path.expanduser(cache_dir)
+    bpath = os.path.join(resolved, "last_black.png")
+    rpath = os.path.join(resolved, "last_red.png")
     black_img.save(bpath)
     red_img.save(rpath)
-    logger.info("Debug images saved: %s, %s", bpath, rpath)
+    logger.info("Backup image saved: %s, %s", bpath, rpath)
 
 
 # ---------------------------------------------------------------------------
@@ -106,11 +105,18 @@ def main() -> int:
     cache_dir = os.path.expanduser(cfg["cache_dir"])
     os.makedirs(cache_dir, exist_ok=True)
 
+    font_path = cfg.get("font_path") or os.path.join(
+        os.path.dirname(__file__), "resources", "pic", "Font.ttc"
+    )
+    timezone_str = cfg["timezone"]
+
     epd = None
     init_called = False
     exit_code = 0
 
     try:
+        from waveshare_epd import epd7in5b_V2
+
         # Step 1 — Fetch weather data
         weather = fetch_weather(
             latitude=cfg["latitude"],
@@ -122,7 +128,6 @@ def main() -> int:
 
         stale_mode = False
         if weather is None:
-            # Fetch failed — try to redraw last known good data with stale flag
             logger.warning("Fetch failed; attempting stale-data fallback")
             weather = read_last_weather(cache_dir)
             if weather is None:
@@ -130,14 +135,11 @@ def main() -> int:
                     "No cached weather available and fetch failed. "
                     "Rendering blank display."
                 )
-                # Draw a blank screen with error message
                 from PIL import Image, ImageDraw
                 black_img = Image.new("1", (800, 480), 255)
                 red_img = Image.new("1", (800, 480), 255)
                 draw_r = ImageDraw.Draw(red_img)
                 draw_r.text((200, 200), "FETCH FAILED — NO DATA", fill=0)
-                # We still need to display this, so init + display
-                from waveshare_epd import epd7in5b_V2
                 epd = epd7in5b_V2.EPD()
                 epd.init()
                 init_called = True
@@ -146,51 +148,66 @@ def main() -> int:
                 return exit_code
             stale_mode = True
 
-        # Step 2 — Determine if full refresh is needed
-        do_refresh, reason = should_full_refresh(
+        # Step 2 — Determine if weather data changed (full refresh needed)
+        do_full_refresh, reason = should_full_refresh(
             cache_dir=cache_dir,
             weather=weather,
             threshold=cfg["full_refresh_interval"],
         )
-        logger.info("Refresh decision: %s (%s)", "FULL" if do_refresh else "SKIP", reason)
 
-        if not do_refresh:
-            # Skip — just update the run counter/timestamp and exit
+        if do_full_refresh:
+            logger.info("Full refresh needed: %s", reason)
+
+            # Step 3 — Render full images
+            black_img, red_img = render_weather(
+                weather, font_path=font_path, stale=stale_mode
+            )
+
+            # Step 4 — Full display update (~15-20s)
+            epd = epd7in5b_V2.EPD()
+            logger.info("Initializing e-Paper (full refresh) ...")
+            init_result = epd.init()
+            if init_result != 0:
+                raise RuntimeError(f"epd.init() failed with code {init_result}")
+            init_called = True
+
+            logger.info("Sending full image buffers (~15-20s) ...")
+            epd.display(epd.getbuffer(black_img), epd.getbuffer(red_img))
+            logger.info("Full display update complete")
+
+            # Step 5 — Update cache
+            write_last_weather(cache_dir, weather)
+            update_meta_after_run(cache_dir, weather, did_refresh=True)
+            _write_debug_images(black_img, red_img, cache_dir)
+
+        else:
+            # Weather unchanged — do a fast partial refresh of the clock only
+            logger.info("Weather unchanged (%s); doing partial clock refresh", reason)
+
+            clk_black, clk_red, region = render_clock_region(
+                timezone_str=timezone_str, font_path=font_path
+            )
+            rx, ry, rx2, ry2 = region
+
+            epd = epd7in5b_V2.EPD()
+            logger.info("Initializing e-Paper (partial refresh) ...")
+            init_result = epd.init_part()
+            if init_result != 0:
+                raise RuntimeError(f"epd.init_part() failed with code {init_result}")
+            init_called = True
+
+            logger.info("Partial clock refresh (~1s) ...")
+            clk_buf = epd.getbuffer(clk_black)
+            epd.display_Partial(clk_buf, rx, ry, rx2, ry2)
+            logger.info("Partial update complete")
+
+            # Keep cache in sync (increment skip counter)
             update_meta_after_run(cache_dir, weather, did_refresh=False)
-            logger.info("Skipping display update (no change)")
-            return 0
-
-        # Step 3 — Render images
-        font_path = cfg.get("font_path") or os.path.join(
-            os.path.dirname(__file__), "resources", "pic", "Font.ttc"
-        )
-        black_img, red_img = render_weather(weather, font_path=font_path, stale=stale_mode)
-
-        # Step 4 — Display on e-Paper
-        from waveshare_epd import epd7in5b_V2
-        epd = epd7in5b_V2.EPD()
-        logger.info("Initializing e-Paper display ...")
-        init_result = epd.init()
-        if init_result != 0:
-            raise RuntimeError(f"epd.init() failed with return code {init_result}")
-        init_called = True
-
-        logger.info("Sending image buffers to display (full refresh ~15-20s) ...")
-        epd.display(epd.getbuffer(black_img), epd.getbuffer(red_img))
-        logger.info("Display update complete")
-
-        # Step 5 — Update cache
-        write_last_weather(cache_dir, weather)
-        update_meta_after_run(cache_dir, weather, did_refresh=True)
-
-        # Save debug images (always useful for verifying output)
-        _write_debug_images(black_img, red_img, cache_dir)
 
     except Exception as exc:
         logger.exception("Unhandled exception during run: %s", exc)
         exit_code = 1
     finally:
-        # Always put the display to sleep if we initialized it
         if epd is not None and init_called:
             try:
                 logger.info("Putting e-Paper to sleep ...")
