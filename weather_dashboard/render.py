@@ -558,16 +558,23 @@ def render_weather(
     y_hourly_label = y_hourly_top - _get_font_height(font_hourly_time) - 30
     draw_b.text((margin, y_hourly_label), "HOURLY", font=font_hourly_time, fill=COLOR_BLACK)
 
-    # Check for upcoming bad weather and display warning in red. Pass the live
-    # local time so the countdown matches the on-screen clock (not the API snapshot).
+    # Check for upcoming bad weather and display warning in red, to the RIGHT of
+    # the HOURLY label so the two don't overlap. Pass the live local time so the
+    # countdown matches the on-screen clock (not the API snapshot).
     from weather_dashboard.weather import get_upcoming_bad_weather
     bad_weather = get_upcoming_bad_weather(
         weather, max_hours_ahead=2, now_dt=_get_local_time(timezone_str)
     )
     if bad_weather:
         minutes = bad_weather["minutes"]
-        bw_text = f"{bad_weather['type']} in {minutes} min ({bad_weather['time']})"
-        draw_r.text((margin + 5, y_hourly_label), bw_text, font=font_hourly_time, fill=COLOR_RED)
+        prob = bad_weather.get("probability")
+        when = "now" if minutes <= 0 else f"in {minutes} min"
+        bw_text = f"{bad_weather['type']} {when} ({bad_weather['time']})"
+        if prob is not None:
+            bw_text += f" {prob}%"
+        label_w = _get_text_width(font_hourly_time, "HOURLY")
+        draw_r.text((margin + label_w + 14, y_hourly_label), bw_text,
+                    font=font_hourly_time, fill=COLOR_RED)
 
     # Calculate spacing for hourly items
     if num_hours > 0:

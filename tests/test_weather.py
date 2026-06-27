@@ -105,5 +105,67 @@ def test_bad_weather_outside_window_ignored():
     assert get_upcoming_bad_weather(w, max_hours_ahead=2, now_dt=datetime(2024, 1, 15, 12, 0)) is None
 
 
+def test_minutely_preferred_over_hourly():
+    """15-min data must catch near-term rain the hourly strip misses."""
+    weather = {
+        "current": {"local_time": "2026-06-27T22:00:00", "weather_code": 3},
+        "hourly_forecast": [
+            {"time": "2026-06-27T23:00:00", "hour": "23:00", "weather_code": 95},
+        ],
+        "minutely_forecast": [
+            {"time": "2026-06-27T22:45:00", "weather_code": 61, "probability": 80},
+        ],
+    }
+    bw = get_upcoming_bad_weather(weather, now_dt=datetime(2026, 6, 27, 22, 5))
+    assert bw is not None
+    assert bw["minutes"] == 40
+    assert bw["time"] == "22:45"
+    assert bw["probability"] == 80
+    assert "rain" in bw["type"].lower()
+
+
+def test_minutely_in_progress_slot_is_now():
+    """A 15-min slot that began a few minutes ago counts as 'now' (minutes=0)."""
+    weather = {
+        "current": {"local_time": "2026-06-27T22:00:00", "weather_code": 63},
+        "minutely_forecast": [
+            {"time": "2026-06-27T22:00:00", "weather_code": 63, "probability": 100},
+        ],
+    }
+    bw = get_upcoming_bad_weather(weather, now_dt=datetime(2026, 6, 27, 22, 5))
+    assert bw is not None
+    assert bw["minutes"] == 0
+
+
+def test_falls_back_to_hourly_without_minutely():
+    weather = {
+        "current": {"local_time": "2026-06-27T22:00:00", "weather_code": 3},
+        "hourly_forecast": [
+            {"time": "2026-06-27T23:00:00", "hour": "23:00", "weather_code": 95},
+        ],
+        "minutely_forecast": [],
+    }
+    bw = get_upcoming_bad_weather(weather, now_dt=datetime(2026, 6, 27, 22, 5))
+    assert bw is not None
+    assert "thunder" in bw["type"].lower()
+    assert bw["probability"] is None
+
+
+def test_parse_populates_minutely_forecast():
+    data = _sample_response()
+    data["minutely_15"] = {
+        "time": [f"2024-01-15T14:{m:02d}" for m in (0, 15, 30, 45)] + ["2024-01-15T15:00"],
+        "weather_code": [3, 3, 61, 61, 61],
+        "precipitation": [0.0, 0.0, 0.5, 0.8, 0.3],
+        "precipitation_probability": [10, 20, 80, 90, 70],
+    }
+    w = _parse_openmeto_response(data, "celsius")
+    # current.time is 14:30, so only slots >= 14:30 are kept.
+    assert [s["time"] for s in w["minutely_forecast"]] == [
+        "2024-01-15T14:30:00", "2024-01-15T14:45:00", "2024-01-15T15:00:00",
+    ]
+    assert w["minutely_forecast"][0]["probability"] == 80
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

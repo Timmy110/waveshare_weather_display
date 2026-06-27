@@ -36,6 +36,8 @@ def fetch_weather(
         # legacy alias and is not guaranteed by the API).
         "current": "temperature_2m,apparent_temperature,wind_speed_10m,weather_code",
         "hourly": "temperature_2m,weather_code",
+        # 15-minute resolution for near-term precipitation timing (e.g. "rain in 40 min").
+        "minutely_15": "weather_code,precipitation,precipitation_probability",
         "daily": "weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset",
         "temperature_unit": unit,
         # We want today + 5 more days = 6 days from API (skip today for 5 forecast days)
@@ -102,7 +104,11 @@ def get_upcoming_bad_weather(
     now_dt: Optional[datetime] = None,
 ) -> Optional[Dict[str, Any]]:
     """
-    Check hourly forecast for bad weather within the next `max_hours_ahead` hours.
+    Find the next precipitation/thunder event within `max_hours_ahead` hours.
+
+    Prefers the 15-minute `minutely_forecast` (so near-term events like "rain in
+    40 min" are caught, including within the current hour); falls back to the
+    hourly forecast when 15-minute data isn't available.
 
     `now_dt` should be the live local time; pass it from the caller so the
     countdown matches the on-screen clock rather than the (possibly stale) API
@@ -110,15 +116,12 @@ def get_upcoming_bad_weather(
 
     Returns None if no bad weather expected, otherwise a dict like:
         {
-            "type": "Rain",           # human-readable type (title case)
-            "minutes": 25,           # minutes until it starts
+            "type": "Rain",          # human-readable type (title case)
+            "minutes": 25,           # minutes until it starts (0 = now)
             "time": "18:35",         # HH:MM when it starts
+            "probability": 80,       # % chance, or None if unavailable
         }
     """
-    hourly = weather.get("hourly_forecast", [])
-    if not hourly:
-        return None
-
     if now_dt is None:
         now_str = weather.get("current", {}).get("local_time")
         if not now_str:
@@ -128,39 +131,53 @@ def get_upcoming_bad_weather(
         except (ValueError, TypeError):
             return None
 
-    # Compare on naive local wall-clock time (hourly timestamps are naive local).
+    # Compare on naive local wall-clock time (API timestamps are naive local).
     now_dt = now_dt.replace(tzinfo=None)
 
-    for hour_data in hourly:
-        code = hour_data.get("weather_code", 0)
+    # Prefer fine-grained 15-minute data; fall back to the hourly strip.
+    minutely = weather.get("minutely_forecast", [])
+    if minutely:
+        hit = _scan_for_bad_weather(minutely, now_dt, max_hours_ahead)
+        if hit is not None:
+            return hit
+    return _scan_for_bad_weather(weather.get("hourly_forecast", []), now_dt, max_hours_ahead)
+
+
+def _scan_for_bad_weather(slots, now_dt: datetime, max_hours_ahead: int,
+                          tolerance_minutes: int = 15):
+    """Return the first upcoming bad-weather slot within the window, or None.
+
+    Each slot is a dict with a full ISO `time` (or legacy `hour` HH:MM),
+    `weather_code`, and optionally `probability`. A slot that began up to
+    `tolerance_minutes` ago is treated as in-progress ("now") rather than past,
+    since each slot represents an interval (15 min for minutely data).
+    """
+    for slot in slots:
+        code = slot.get("weather_code", 0)
         if code not in BAD_WEATHER_CODES:
             continue
 
-        # Prefer the full ISO timestamp; fall back to legacy HH:MM entries.
-        time_iso = hour_data.get("time")
+        time_iso = slot.get("time")
         try:
             if time_iso:
-                hour_full = datetime.fromisoformat(time_iso)
+                slot_dt = datetime.fromisoformat(time_iso)
             else:
-                hour_dt = datetime.strptime(hour_data.get("hour", ""), "%H:%M")
-                hour_full = hour_dt.replace(
+                slot_dt = datetime.strptime(slot.get("hour", ""), "%H:%M").replace(
                     year=now_dt.year, month=now_dt.month, day=now_dt.day
                 )
         except (ValueError, TypeError):
             continue
 
-        # Skip hours already in the past.
-        if hour_full < now_dt:
-            continue
-
-        total_minutes = int((hour_full - now_dt).total_seconds() / 60)
-        if total_minutes <= max_hours_ahead * 60:
+        minutes = (slot_dt - now_dt).total_seconds() / 60
+        if minutes < -tolerance_minutes:
+            continue  # fully in the past
+        if minutes <= max_hours_ahead * 60:
             return {
                 "type": BAD_WEATHER_CODES[code].capitalize(),
-                "minutes": total_minutes,
-                "time": hour_full.strftime("%H:%M"),
+                "minutes": max(0, int(minutes)),
+                "time": slot_dt.strftime("%H:%M"),
+                "probability": slot.get("probability"),
             }
-
     return None
 
 
@@ -209,6 +226,29 @@ def _parse_openmeto_response(data: Dict[str, Any], unit: str) -> Dict[str, Any]:
                 "weather_code": hourly["weather_code"][i],
             })
 
+    # Build 15-minute forecast for near-term precipitation timing (next ~3h).
+    minutely = data.get("minutely_15", {})
+    minutely_forecast = []
+    if minutely.get("time") and local_time:
+        codes = minutely.get("weather_code", [])
+        precs = minutely.get("precipitation", [])
+        probs = minutely.get("precipitation_probability", [])
+        for i, t in enumerate(minutely["time"]):
+            try:
+                t_dt = datetime.strptime(t, "%Y-%m-%dT%H:%M")
+            except ValueError:
+                continue
+            if t_dt < local_time:
+                continue
+            minutely_forecast.append({
+                "time": t_dt.isoformat(),
+                "weather_code": codes[i] if i < len(codes) else None,
+                "precipitation": precs[i] if i < len(precs) else None,
+                "probability": probs[i] if i < len(probs) else None,
+            })
+            if len(minutely_forecast) >= 12:  # ~3 hours at 15-min resolution
+                break
+
     # Build forecast list (5 days, skip today if we already show it in current)
     forecast = []
     time_strs = daily["time"]  # UTC date strings like "2024-01-15"
@@ -248,6 +288,7 @@ def _parse_openmeto_response(data: Dict[str, Any], unit: str) -> Dict[str, Any]:
             "local_time": local_time.isoformat() if local_time else None,
         },
         "hourly_forecast": hourly_forecast,
+        "minutely_forecast": minutely_forecast,
         "today_high": daily["temperature_2m_max"][0],
         "today_low": daily["temperature_2m_min"][0],
         "sunrise": sunrise_dt.strftime("%H:%M") if sunrise_dt else None,
