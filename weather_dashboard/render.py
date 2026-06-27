@@ -566,12 +566,16 @@ def render_weather(
         weather, max_hours_ahead=2, now_dt=_get_local_time(timezone_str)
     )
     if bad_weather:
-        minutes = bad_weather["minutes"]
         prob = bad_weather.get("probability")
-        when = "now" if minutes <= 0 else f"in {minutes} min"
-        bw_text = f"{bad_weather['type']} {when} ({bad_weather['time']})"
+        # Show the start TIME, not a "in N min" countdown: the panel only
+        # refreshes periodically, so a minute countdown would freeze and go
+        # stale between refreshes, while the absolute time stays correct.
+        if bad_weather["minutes"] <= 0:
+            bw_text = f"{bad_weather['type']} now"
+        else:
+            bw_text = f"{bad_weather['type']} ~{bad_weather['time']}"
         if prob is not None:
-            bw_text += f" {prob}%"
+            bw_text += f" ({prob}%)"
         label_w = _get_text_width(font_hourly_time, "HOURLY")
         draw_r.text((margin + label_w + 14, y_hourly_label), bw_text,
                     font=font_hourly_time, fill=COLOR_RED)
