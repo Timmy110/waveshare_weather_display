@@ -558,24 +558,29 @@ def render_weather(
     y_hourly_label = y_hourly_top - _get_font_height(font_hourly_time) - 30
     draw_b.text((margin, y_hourly_label), "HOURLY", font=font_hourly_time, fill=COLOR_BLACK)
 
-    # Check for upcoming bad weather and display warning in red, to the RIGHT of
-    # the HOURLY label so the two don't overlap. Pass the live local time so the
-    # countdown matches the on-screen clock (not the API snapshot).
-    from weather_dashboard.weather import get_upcoming_bad_weather
-    bad_weather = get_upcoming_bad_weather(
-        weather, max_hours_ahead=2, now_dt=_get_local_time(timezone_str)
-    )
-    if bad_weather:
-        prob = bad_weather.get("probability")
-        # Show the start TIME, not a "in N min" countdown: the panel only
-        # refreshes periodically, so a minute countdown would freeze and go
-        # stale between refreshes, while the absolute time stays correct.
-        if bad_weather["minutes"] <= 0:
-            bw_text = f"{bad_weather['type']} now"
+    # Bad-weather warning in red, to the RIGHT of the HOURLY label so the two
+    # don't overlap. If it's already raining/snowing/storming, show when it ends;
+    # otherwise show when the next event starts. Times (not "in N min") are used
+    # because the panel only refreshes periodically and a countdown would go stale.
+    from weather_dashboard.weather import get_active_bad_weather, get_upcoming_bad_weather
+    now_local = _get_local_time(timezone_str)
+    bw_text = None
+
+    active = get_active_bad_weather(weather, now_dt=now_local)
+    if active:
+        if active["ends"]:
+            bw_text = f"{active['type']} until {active['ends']}"
         else:
-            bw_text = f"{bad_weather['type']} ~{bad_weather['time']}"
-        if prob is not None:
-            bw_text += f" ({prob}%)"
+            bw_text = f"{active['type']} ongoing"
+    else:
+        upcoming = get_upcoming_bad_weather(weather, max_hours_ahead=2, now_dt=now_local)
+        if upcoming:
+            when = "now" if upcoming["minutes"] <= 0 else f"~{upcoming['time']}"
+            bw_text = f"{upcoming['type']} {when}"
+            if upcoming.get("probability") is not None:
+                bw_text += f" ({upcoming['probability']}%)"
+
+    if bw_text:
         label_w = _get_text_width(font_hourly_time, "HOURLY")
         draw_r.text((margin + label_w + 14, y_hourly_label), bw_text,
                     font=font_hourly_time, fill=COLOR_RED)

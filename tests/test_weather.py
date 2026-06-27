@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from weather_dashboard.weather import (  # noqa: E402
     _parse_openmeto_response,
+    get_active_bad_weather,
     get_upcoming_bad_weather,
 )
 
@@ -165,6 +166,52 @@ def test_parse_populates_minutely_forecast():
         "2024-01-15T14:30:00", "2024-01-15T14:45:00", "2024-01-15T15:00:00",
     ]
     assert w["minutely_forecast"][0]["probability"] == 80
+
+
+def test_active_none_when_clear():
+    w = {"current": {"local_time": "2026-06-27T22:00:00", "weather_code": 3},
+         "minutely_forecast": [], "hourly_forecast": []}
+    assert get_active_bad_weather(w, now_dt=datetime(2026, 6, 27, 22, 5)) is None
+
+
+def test_active_reports_end_time():
+    w = {
+        "current": {"local_time": "2026-06-27T22:00:00", "weather_code": 61},
+        "minutely_forecast": [
+            {"time": "2026-06-27T22:15:00", "weather_code": 61},
+            {"time": "2026-06-27T22:30:00", "weather_code": 3},  # clears
+        ],
+        "hourly_forecast": [],
+    }
+    active = get_active_bad_weather(w, now_dt=datetime(2026, 6, 27, 22, 5))
+    assert active is not None
+    assert "rain" in active["type"].lower()
+    assert active["ends"] == "22:30"
+
+
+def test_active_ongoing_when_no_clearing_in_data():
+    w = {
+        "current": {"local_time": "2026-06-27T22:00:00", "weather_code": 95},
+        "minutely_forecast": [{"time": "2026-06-27T22:15:00", "weather_code": 95}],
+        "hourly_forecast": [],
+    }
+    active = get_active_bad_weather(w, now_dt=datetime(2026, 6, 27, 22, 5))
+    assert active is not None
+    assert active["ends"] is None
+    assert "thunder" in active["type"].lower()
+
+
+def test_active_uses_hourly_fallback_for_long_events():
+    w = {
+        "current": {"local_time": "2026-06-27T22:00:00", "weather_code": 73},
+        "minutely_forecast": [{"time": "2026-06-27T22:15:00", "weather_code": 73}],
+        "hourly_forecast": [
+            {"time": "2026-06-27T23:00:00", "hour": "23:00", "weather_code": 73},
+            {"time": "2026-06-28T01:00:00", "hour": "01:00", "weather_code": 2},
+        ],
+    }
+    active = get_active_bad_weather(w, now_dt=datetime(2026, 6, 27, 22, 5))
+    assert active["ends"] == "01:00"
 
 
 if __name__ == "__main__":

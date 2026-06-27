@@ -181,6 +181,66 @@ def _scan_for_bad_weather(slots, now_dt: datetime, max_hours_ahead: int,
     return None
 
 
+def get_active_bad_weather(
+    weather: Dict[str, Any],
+    now_dt: Optional[datetime] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    If precipitation/thunder is happening *now*, return when it's expected to end.
+
+    Returns None when it isn't currently bad weather, otherwise:
+        {
+            "type": "Rain",       # current condition (title case)
+            "ends": "23:30",      # HH:MM the forecast clears, or None if unknown
+        }
+
+    "Now" is taken from the current conditions (`current.weather_code`), matching
+    the large icon on screen; the clearing time is the first upcoming slot with a
+    non-bad code, using the 15-minute series first and the hourly series as a
+    longer-range fallback.
+    """
+    code = weather.get("current", {}).get("weather_code")
+    if code not in BAD_WEATHER_CODES:
+        return None
+
+    if now_dt is None:
+        now_str = weather.get("current", {}).get("local_time")
+        try:
+            now_dt = datetime.fromisoformat(now_str) if now_str else None
+        except (ValueError, TypeError):
+            now_dt = None
+    if now_dt is not None:
+        now_dt = now_dt.replace(tzinfo=None)
+
+    ends = None
+    if now_dt is not None:
+        ends = _find_clearing_time(weather.get("minutely_forecast", []), now_dt)
+        if ends is None:
+            ends = _find_clearing_time(weather.get("hourly_forecast", []), now_dt)
+
+    return {"type": BAD_WEATHER_CODES[code].capitalize(), "ends": ends}
+
+
+def _find_clearing_time(slots, now_dt: datetime) -> Optional[str]:
+    """Return HH:MM of the first future slot whose code is NOT bad weather."""
+    for slot in slots:
+        time_iso = slot.get("time")
+        try:
+            if time_iso:
+                slot_dt = datetime.fromisoformat(time_iso)
+            else:
+                slot_dt = datetime.strptime(slot.get("hour", ""), "%H:%M").replace(
+                    year=now_dt.year, month=now_dt.month, day=now_dt.day
+                )
+        except (ValueError, TypeError):
+            continue
+        if slot_dt <= now_dt:
+            continue
+        if slot.get("weather_code", 0) not in BAD_WEATHER_CODES:
+            return slot_dt.strftime("%H:%M")
+    return None
+
+
 def _parse_openmeto_response(data: Dict[str, Any], unit: str) -> Dict[str, Any]:
     """Convert the raw Open-Meteo JSON into our internal weather dict."""
 
