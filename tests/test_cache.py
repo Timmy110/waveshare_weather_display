@@ -8,6 +8,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from weather_dashboard.cache import (  # noqa: E402
+    diff_weather,
     should_full_refresh,
     update_meta_after_run,
     weather_data_hash,
@@ -66,6 +67,40 @@ def test_changed_data_forces_refresh(tmp_path):
     do_refresh, reason = should_full_refresh(cache, _weather(9.0), threshold=24)
     assert do_refresh is True
     assert "changed" in reason.lower()
+
+
+def test_diff_none_prev_returns_empty():
+    assert diff_weather(None, _weather()) == []
+
+
+def test_diff_identical_returns_empty():
+    assert diff_weather(_weather(), _weather()) == []
+
+
+def test_diff_ignores_sub_degree_changes():
+    # 7.0 -> 7.4 rounds to the same degree, so no reported change.
+    assert diff_weather(_weather(7.0), _weather(7.4)) == []
+
+
+def test_diff_reports_temperature_change():
+    changes = diff_weather(_weather(7.0), _weather(9.0))
+    assert any("Temperature" in c and "7" in c and "9" in c for c in changes)
+
+
+def test_diff_reports_condition_change_with_labels():
+    prev = _weather()
+    cur = _weather()
+    cur["current"]["weather_code"] = 61  # Slight Rain
+    changes = diff_weather(prev, cur)
+    assert any("Condition" in c and "Rain" in c for c in changes)
+
+
+def test_diff_reports_forecast_day_change():
+    prev = _weather()
+    cur = _weather()
+    cur["forecast"][0]["high"] = 15  # was 9
+    changes = diff_weather(prev, cur)
+    assert any("Tue forecast" in c and "high" in c for c in changes)
 
 
 if __name__ == "__main__":

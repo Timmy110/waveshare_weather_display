@@ -28,6 +28,7 @@ if _lib_dir not in sys.path:
     sys.path.insert(0, _lib_dir)
 
 from weather_dashboard.cache import (  # noqa: E402
+    diff_weather,
     read_last_weather,
     should_full_refresh,
     update_meta_after_run,
@@ -249,6 +250,15 @@ def main() -> int:
             threshold=cfg["full_refresh_interval"],
         )
         logger.info("%s refresh: %s", "Full" if do_full_refresh else "Fast", reason)
+
+        # List exactly what changed (vs the last cached weather) when a full
+        # refresh is driven by new data — empty for first run / counter refresh.
+        if do_full_refresh:
+            changes = diff_weather(read_last_weather(cache_dir), weather)
+            if changes:
+                logger.info("Weather changed since last update:")
+                for change in changes:
+                    logger.info("  • %s", change)
 
         # Step 3 — Render images (live clock time, not the stale API snapshot)
         black_img, red_img = render_weather(

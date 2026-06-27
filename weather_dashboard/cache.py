@@ -24,8 +24,12 @@ def read_last_weather(cache_dir: str) -> Optional[Dict[str, Any]]:
     try:
         with open(path, "r") as f:
             return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError) as exc:
-        logger.warning("No valid weather cache at %s: %s", path, exc)
+    except FileNotFoundError:
+        # Expected on the first run (callers that care log their own message).
+        logger.debug("No weather cache yet at %s", path)
+        return None
+    except json.JSONDecodeError as exc:
+        logger.warning("Corrupt weather cache at %s: %s", path, exc)
         return None
 
 
@@ -96,6 +100,81 @@ def weather_data_hash(weather: Dict[str, Any]) -> str:
     }
     raw = json.dumps(snapshot, sort_keys=True)
     return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def diff_weather(
+    prev: Optional[Dict[str, Any]],
+    current: Dict[str, Any],
+) -> list:
+    """
+    Return human-readable descriptions of what changed between two weather
+    payloads, comparing the same rounded fields used by weather_data_hash().
+
+    Returns an empty list if `prev` is None or nothing material changed.
+    """
+    if not prev:
+        return []
+
+    # Imported lazily to avoid a hard import cycle at module load.
+    from weather_dashboard.render import condition_label
+
+    def rnd(value):
+        return round(value or 0)
+
+    changes = []
+    pc = prev.get("current", {})
+    cc = current.get("current", {})
+
+    if rnd(pc.get("temperature")) != rnd(cc.get("temperature")):
+        changes.append(f"Temperature: {rnd(pc.get('temperature'))}° → {rnd(cc.get('temperature'))}°")
+    if pc.get("weather_code") != cc.get("weather_code"):
+        changes.append(
+            f"Condition: {condition_label(pc.get('weather_code'))} → {condition_label(cc.get('weather_code'))}"
+        )
+    if rnd(pc.get("feels_like")) != rnd(cc.get("feels_like")):
+        changes.append(f"Feels like: {rnd(pc.get('feels_like'))}° → {rnd(cc.get('feels_like'))}°")
+    if rnd(pc.get("wind_speed")) != rnd(cc.get("wind_speed")):
+        changes.append(f"Wind: {rnd(pc.get('wind_speed'))} → {rnd(cc.get('wind_speed'))} km/h")
+
+    if rnd(prev.get("today_high")) != rnd(current.get("today_high")):
+        changes.append(f"Today's high: {rnd(prev.get('today_high'))}° → {rnd(current.get('today_high'))}°")
+    if rnd(prev.get("today_low")) != rnd(current.get("today_low")):
+        changes.append(f"Today's low: {rnd(prev.get('today_low'))}° → {rnd(current.get('today_low'))}°")
+
+    if prev.get("sunrise") != current.get("sunrise"):
+        changes.append(f"Sunrise: {prev.get('sunrise')} → {current.get('sunrise')}")
+    if prev.get("sunset") != current.get("sunset"):
+        changes.append(f"Sunset: {prev.get('sunset')} → {current.get('sunset')}")
+
+    # Per-day forecast, matched by weekday label.
+    prev_days = {d.get("weekday"): d for d in prev.get("forecast", [])}
+    for d in current.get("forecast", []):
+        pd = prev_days.get(d.get("weekday"))
+        if pd is None:
+            continue
+        parts = []
+        if rnd(pd.get("high")) != rnd(d.get("high")):
+            parts.append(f"high {rnd(pd.get('high'))}°→{rnd(d.get('high'))}°")
+        if rnd(pd.get("low")) != rnd(d.get("low")):
+            parts.append(f"low {rnd(pd.get('low'))}°→{rnd(d.get('low'))}°")
+        if pd.get("weather_code") != d.get("weather_code"):
+            parts.append(f"{condition_label(pd.get('weather_code'))}→{condition_label(d.get('weather_code'))}")
+        if parts:
+            changes.append(f"{d.get('weekday')} forecast: " + ", ".join(parts))
+
+    # Hourly strip: report how many of the shown hours differ (the window also
+    # slides over time, so this naturally picks up the advancing forecast).
+    prev_hours = {h.get("hour"): h for h in prev.get("hourly_forecast", [])}
+    hourly_changed = 0
+    for h in current.get("hourly_forecast", []):
+        ph = prev_hours.get(h.get("hour"))
+        if ph is None or rnd(ph.get("temperature")) != rnd(h.get("temperature")) \
+                or ph.get("weather_code") != h.get("weather_code"):
+            hourly_changed += 1
+    if hourly_changed:
+        changes.append(f"Hourly forecast: {hourly_changed} hour(s) updated")
+
+    return changes
 
 
 def should_full_refresh(

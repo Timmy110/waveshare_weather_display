@@ -336,6 +336,13 @@ def _condition_label_and_icon(code: int) -> Tuple[str, str]:
     return text, icon
 
 
+def condition_label(code: Optional[int]) -> str:
+    """Public helper: human-readable label for a WMO weather code."""
+    if code is None:
+        return "?"
+    return _condition_label_and_icon(code)[0]
+
+
 def _get_local_time(timezone_str: str = "Europe/Paris") -> datetime:
     """Return the current local time in the configured timezone."""
     if sys.version_info >= (3, 9):
