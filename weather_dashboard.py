@@ -7,6 +7,11 @@ and exits cleanly. Designed to be triggered by cron / systemd timer on a Raspber
 
 Usage:
     python weather_dashboard.py [--config config.json]
+    python weather_dashboard.py --no-display          # render only, no hardware
+    python weather_dashboard.py -o preview.png        # save a preview image
+
+If the e-Paper driver/hardware isn't present, the script automatically falls
+back to headless (image-only) mode instead of failing.
 """
 
 import argparse
@@ -28,7 +33,11 @@ from weather_dashboard.cache import (  # noqa: E402
     update_meta_after_run,
     write_last_weather,
 )
-from weather_dashboard.render import render_weather  # noqa: E402
+from weather_dashboard.render import (  # noqa: E402
+    compose_rgb,
+    render_blank,
+    render_weather,
+)
 from weather_dashboard.weather import fetch_weather  # noqa: E402
 
 logger = logging.getLogger("weather_dashboard")
@@ -43,11 +52,29 @@ _DEFAULTS = {
     "longitude": 2.3522,
     "timezone": "Europe/Paris",
     "temperature_unit": "celsius",
-    "cache_dir": "~/.weather_dashboard",
+    # Relative paths are resolved against the repo (script) directory, so the
+    # cache travels with the project and works regardless of the cwd cron uses.
+    "cache_dir": "cache",
     "full_refresh_interval": 24,
     "api_timeout_seconds": 10,
     "font_path": None,
 }
+
+
+def resolve_cache_dir(cache_dir: str) -> str:
+    """
+    Resolve the configured cache_dir to an absolute path.
+
+    - A leading ``~`` is expanded to the user's home directory.
+    - Absolute paths are used as-is.
+    - Relative paths are resolved against the repo/script directory (``_here``),
+      NOT the current working directory — so the cache stays with the project
+      even if it's moved or run from a different cwd (e.g. cron).
+    """
+    expanded = os.path.expanduser(cache_dir)
+    if not os.path.isabs(expanded):
+        expanded = os.path.join(_here, expanded)
+    return os.path.abspath(expanded)
 
 
 def load_config(path: str) -> Dict[str, Any]:
@@ -68,13 +95,48 @@ def load_config(path: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def _write_debug_images(black_img, red_img, cache_dir: str):
-    """Save a single backup copy of the last-rendered images (overwrites previous)."""
+    """
+    Save inspectable copies of the last render (overwrites previous): the two
+    raw 1-bit panel buffers plus `preview.png`, a composite RGB image that
+    mimics how the physical panel looks.
+    """
     resolved = os.path.expanduser(cache_dir)
-    bpath = os.path.join(resolved, "last_black.png")
-    rpath = os.path.join(resolved, "last_red.png")
-    black_img.save(bpath)
-    red_img.save(rpath)
-    logger.info("Backup image saved: %s, %s", bpath, rpath)
+    black_img.save(os.path.join(resolved, "last_black.png"))
+    red_img.save(os.path.join(resolved, "last_red.png"))
+    compose_rgb(black_img, red_img).save(os.path.join(resolved, "preview.png"))
+    logger.info("Debug images saved to %s (preview.png is the composite)", resolved)
+
+
+def _send_to_panel(epd_module, black_img, red_img, full_refresh: bool):
+    """
+    Push the rendered buffers to the physical e-Paper panel.
+
+    Returns the initialized EPD object so the caller can put it to sleep.
+    A full refresh (~15-20s) clears ghosting; a fast refresh (~5-8s) is used
+    when only the clock changed.
+    """
+    epd = epd_module.EPD()
+    label = "full refresh" if full_refresh else "fast refresh"
+    logger.info("Initializing e-Paper (%s) ...", label)
+    init_result = epd.init() if full_refresh else epd.init_Fast()
+    if init_result != 0:
+        raise RuntimeError(f"e-Paper init failed with code {init_result}")
+    logger.info("Sending image buffers to panel ...")
+    epd.display(epd.getbuffer(black_img), epd.getbuffer(red_img))
+    logger.info("Display update complete")
+    return epd
+
+
+def _emit_headless(black_img, red_img, cache_dir: str, output_path):
+    """Report/save the preview image when running without the display."""
+    if output_path:
+        compose_rgb(black_img, red_img).save(output_path)
+        logger.info("Preview image written to %s", output_path)
+    else:
+        logger.info(
+            "Headless mode — preview image at %s",
+            os.path.join(os.path.expanduser(cache_dir), "preview.png"),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +152,19 @@ def main() -> int:
         default=os.path.join(_here, "config.json"),
         help="Path to config JSON (default: ./config.json)",
     )
+    parser.add_argument(
+        "--no-display",
+        action="store_true",
+        help="Don't touch the e-Paper hardware; just render the image "
+             "(for testing on a machine without the display).",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        metavar="PATH",
+        default=None,
+        help="Save a composite PNG preview of the screen to PATH. Implies --no-display.",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -102,8 +177,9 @@ def main() -> int:
     cfg = load_config(args.config)
 
     # Resolve cache dir early so it exists for all subsequent calls
-    cache_dir = os.path.expanduser(cfg["cache_dir"])
+    cache_dir = resolve_cache_dir(cfg["cache_dir"])
     os.makedirs(cache_dir, exist_ok=True)
+    logger.info("Using cache directory: %s", cache_dir)
 
     font_path = cfg.get("font_path") or os.path.join(
         os.path.dirname(__file__), "resources", "pic", "Font.ttc"
@@ -111,13 +187,30 @@ def main() -> int:
     timezone_str = cfg["timezone"]
     city_name = cfg.get("city_name")
 
+    # Decide where output goes: the physical panel, or an image file (headless).
+    # `--output`/`--no-display` force headless; otherwise we try to load the
+    # driver and fall back to headless automatically if the hardware/driver is
+    # unavailable (e.g. running on a laptop for testing).
+    headless = args.no_display or args.output is not None
+    epd_module = None
+    if not headless:
+        try:
+            from waveshare_epd import epd7in5b_V2
+            epd_module = epd7in5b_V2
+        except Exception as exc:
+            logger.warning(
+                "e-Paper driver unavailable (%s). Falling back to headless "
+                "image-only mode; pass --no-display to silence this.", exc
+            )
+            headless = True
+    if headless:
+        logger.info("Running headless (no display) — rendering image only, hardware untouched.")
+
     epd = None
     init_called = False
     exit_code = 0
 
     try:
-        from waveshare_epd import epd7in5b_V2
-
         # Step 1 — Fetch weather data
         weather = fetch_weather(
             latitude=cfg["latitude"],
@@ -134,19 +227,19 @@ def main() -> int:
             if weather is None:
                 logger.error(
                     "No cached weather available and fetch failed. "
-                    "Rendering blank display."
+                    "Rendering error screen."
                 )
-                from PIL import Image, ImageDraw
-                black_img = Image.new("1", (800, 480), 255)
-                red_img = Image.new("1", (800, 480), 255)
+                from PIL import ImageDraw
+                black_img, red_img = render_blank()
                 draw_r = ImageDraw.Draw(red_img)
                 draw_r.text((200, 200), "FETCH FAILED — NO DATA", fill=0)
-                epd = epd7in5b_V2.EPD()
-                epd.init()
-                init_called = True
-                epd.display(epd.getbuffer(black_img), epd.getbuffer(red_img))
-                exit_code = 1
-                return exit_code
+                _write_debug_images(black_img, red_img, cache_dir)
+                if headless:
+                    _emit_headless(black_img, red_img, cache_dir, args.output)
+                else:
+                    epd = _send_to_panel(epd_module, black_img, red_img, full_refresh=True)
+                    init_called = True
+                return 1
             stale_mode = True
 
         # Step 2 — Determine if weather data changed (full refresh needed)
@@ -155,56 +248,25 @@ def main() -> int:
             weather=weather,
             threshold=cfg["full_refresh_interval"],
         )
+        logger.info("%s refresh: %s", "Full" if do_full_refresh else "Fast", reason)
 
-        if do_full_refresh:
-            logger.info("Full refresh needed: %s", reason)
+        # Step 3 — Render images (live clock time, not the stale API snapshot)
+        black_img, red_img = render_weather(
+            weather, font_path=font_path, stale=stale_mode,
+            timezone_str=timezone_str, city_name=city_name,
+        )
+        _write_debug_images(black_img, red_img, cache_dir)
 
-            # Step 3 — Render full images
-            black_img, red_img = render_weather(
-                weather, font_path=font_path, stale=stale_mode, timezone_str=timezone_str, city_name=city_name
-            )
-
-            # Step 4 — Full display update (~15-20s)
-            epd = epd7in5b_V2.EPD()
-            logger.info("Initializing e-Paper (full refresh) ...")
-            init_result = epd.init()
-            if init_result != 0:
-                raise RuntimeError(f"epd.init() failed with code {init_result}")
-            init_called = True
-
-            logger.info("Sending full image buffers (~15-20s) ...")
-            epd.display(epd.getbuffer(black_img), epd.getbuffer(red_img))
-            logger.info("Full display update complete")
-
-            # Step 5 — Update cache
-            write_last_weather(cache_dir, weather)
-            update_meta_after_run(cache_dir, weather, did_refresh=True)
-            _write_debug_images(black_img, red_img, cache_dir)
-
+        # Step 4 — Output: physical panel or image file
+        if headless:
+            _emit_headless(black_img, red_img, cache_dir, args.output)
         else:
-            # Weather unchanged — fast refresh to update the clock without ghosting
-            logger.info("Weather unchanged (%s); doing fast full-screen refresh", reason)
-
-            # Re-render with live clock time (not stale API snapshot)
-            black_img, red_img = render_weather(
-                weather, font_path=font_path, stale=stale_mode, timezone_str=timezone_str, city_name=city_name
-            )
-
-            epd = epd7in5b_V2.EPD()
-            logger.info("Initializing e-Paper (fast refresh) ...")
-            init_result = epd.init_Fast()
-            if init_result != 0:
-                raise RuntimeError(f"epd.init_Fast() failed with code {init_result}")
+            epd = _send_to_panel(epd_module, black_img, red_img, full_refresh=do_full_refresh)
             init_called = True
 
-            logger.info("Sending fast image buffers (~5-8s) ...")
-            epd.display(epd.getbuffer(black_img), epd.getbuffer(red_img))
-            logger.info("Fast refresh complete")
-
-            # Update cache + re-save backup images (clock changed)
-            write_last_weather(cache_dir, weather)
-            update_meta_after_run(cache_dir, weather, did_refresh=False)
-            _write_debug_images(black_img, red_img, cache_dir)
+        # Step 5 — Update cache + refresh metadata
+        write_last_weather(cache_dir, weather)
+        update_meta_after_run(cache_dir, weather, did_refresh=do_full_refresh)
 
     except Exception as exc:
         logger.exception("Unhandled exception during run: %s", exc)

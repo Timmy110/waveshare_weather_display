@@ -45,8 +45,12 @@ def read_render_meta(cache_dir: str) -> Optional[Dict[str, Any]]:
     try:
         with open(path, "r") as f:
             return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError) as exc:
-        logger.warning("No valid render meta cache at %s: %s", path, exc)
+    except FileNotFoundError:
+        # Expected on the first run before any render has happened.
+        logger.debug("No render meta cache yet at %s", path)
+        return None
+    except json.JSONDecodeError as exc:
+        logger.warning("Corrupt render meta cache at %s: %s", path, exc)
         return None
 
 

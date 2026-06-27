@@ -1,0 +1,11 @@
+# Development / testing dependencies (NOT needed on the Raspberry Pi).
+# Install with: pip install -r requirements-dev.txt
+-r requirements.txt
+
+# Unit tests
+pytest>=7.0
+
+# IANA timezone database for `zoneinfo` on systems without one (e.g. Windows),
+# so the clock shows the configured local time when testing off-device.
+# The Raspberry Pi ships its own tz database, so this is only pulled in on Windows.
+tzdata>=2024.1; platform_system == "Windows"

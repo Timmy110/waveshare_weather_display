@@ -6,11 +6,12 @@ import math
 import os
 import sys
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 # zoneinfo is stdlib since Python 3.9
 if sys.version_info >= (3, 9):
-    from zoneinfo import ZoneInfo
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+    pytz = None
 else:
     try:
         import pytz
@@ -135,6 +136,12 @@ def _get_text_width(font, text):
         return len(text) * 6
 
 
+def _draw_centered_text(draw, text, font, center_x, y, fill):
+    """Draw `text` horizontally centered on `center_x` at vertical position `y`."""
+    w = _get_text_width(font, text)
+    draw.text((center_x - w // 2, y), text, font=font, fill=fill)
+
+
 def _draw_thick_line(draw, xy, fill, thickness=1):
     """
     Draw a line with specified thickness.
@@ -211,7 +218,6 @@ def _load_icon_mask(icon_name: str, size: int) -> Optional[Image.Image]:
         
         # Threshold alpha: opaque pixels (>128) become the icon shape
         mask = alpha.point(lambda p: 255 if p > 128 else 0).convert("1")
-        mask = mask.convert("1")
 
         # Cache the result
         _icon_cache.setdefault(icon_name, {})[size] = mask
@@ -334,16 +340,14 @@ def _get_local_time(timezone_str: str = "Europe/Paris") -> datetime:
     """Return the current local time in the configured timezone."""
     if sys.version_info >= (3, 9):
         try:
-            tz = ZoneInfo(timezone_str)
-            return datetime.now(tz)
-        except (KeyError, Exception):
-            pass
+            return datetime.now(ZoneInfo(timezone_str))
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            logger.warning("Unknown timezone %r (%s); falling back to UTC", timezone_str, exc)
     elif pytz is not None:
         try:
-            tz = pytz.timezone(timezone_str)
-            return datetime.now(tz)
-        except (pytz.UnknownTimeZoneError, Exception):
-            pass
+            return datetime.now(pytz.timezone(timezone_str))
+        except pytz.UnknownTimeZoneError as exc:
+            logger.warning("Unknown timezone %r (%s); falling back to UTC", timezone_str, exc)
     return datetime.now(timezone.utc)
 
 
@@ -360,13 +364,19 @@ def _round_up_to_5min(dt: datetime) -> datetime:
 def render_clock_region(
     timezone_str: str = "Europe/Paris",
     font_path: Optional[str] = None,
-) -> Tuple[Image.Image, Image.Image]:
+) -> Tuple[Image.Image, Image.Image, Tuple[int, int, int, int]]:
     """
     Render only the clock + date region for a partial e-paper refresh.
 
-    Returns cropped black and red images covering the same pixel area as the
-    full-render clock block so display_Partial() can blit it directly.
+    Returns (black_img, red_img, region) where `region` is the (x0, y0, x1, y1)
+    pixel box — matching the full-render clock block — so a caller can blit it
+    via display_Partial(). NOTE: the bundled epd7in5b_V2 driver does expose
+    init_part()/display_Partial(), but partial refresh on this 3-color panel is
+    experimental and prone to red-channel ghosting; the main loop currently uses
+    a fast full refresh instead. This helper is kept for that future path.
     """
+    if not (font_path and os.path.isfile(font_path)):
+        font_path = _default_font_path()
     if font_path and os.path.isfile(font_path):
         font_clock = _load_font(font_path, 96)
         font_hourly_time = _load_font(font_path, 20)
@@ -393,14 +403,10 @@ def render_clock_region(
     red_img = Image.new("1", (rw, rh), COLOR_BG)
     draw_b = ImageDraw.Draw(black_img)
 
-    clock_width = _get_text_width(font_clock, clock_display)
-    clock_x = (rw - clock_width) // 2
-    draw_b.text((clock_x, 0), clock_display, font=font_clock, fill=COLOR_BLACK)
+    _draw_centered_text(draw_b, clock_display, font_clock, rw // 2, 0, COLOR_BLACK)
 
     y_date = _get_font_height(font_clock) + 5
-    date_width = _get_text_width(font_hourly_time, date_display)
-    date_x = (rw - date_width) // 2
-    draw_b.text((date_x, y_date), date_display, font=font_hourly_time, fill=COLOR_BLACK)
+    _draw_centered_text(draw_b, date_display, font_hourly_time, rw // 2, y_date, COLOR_BLACK)
 
     return black_img, red_img, region
 
@@ -426,7 +432,11 @@ def render_weather(
     """
     # Clear icon cache on each render to allow updates
     _icon_cache.clear()
-    
+
+    # Fall back to a system TrueType font (e.g. DejaVu) before the bitmap default
+    if not (font_path and os.path.isfile(font_path)):
+        font_path = _default_font_path()
+
     # Font sizes
     if font_path and os.path.isfile(font_path):
         font_clock = _load_font(font_path, 96)          # clock display
@@ -481,9 +491,8 @@ def render_weather(
     date_display = now_dt.strftime("%a, %b %d")
 
     # Center the clock within the left column
-    clock_width = _get_text_width(font_clock, clock_display)
-    clock_x = margin + (left_col_width - clock_width) // 2
-    draw_b.text((clock_x, y_clock), clock_display, font=font_clock, fill=COLOR_BLACK)
+    left_center_x = margin + left_col_width // 2
+    _draw_centered_text(draw_b, clock_display, font_clock, left_center_x, y_clock, COLOR_BLACK)
     y_after_clock = y_clock + _get_font_height(font_clock) + 5
 
     # Build date line, optionally with city name
@@ -491,10 +500,7 @@ def render_weather(
         date_line = f"{date_display} — {city_name}"
     else:
         date_line = date_display
-    date_width = _get_text_width(font_hourly_time, date_line)
-    date_x = margin + (left_col_width - date_width) // 2
-    draw_b.text((date_x, y_after_clock), date_line,
-                font=font_hourly_time, fill=COLOR_BLACK)
+    _draw_centered_text(draw_b, date_line, font_hourly_time, left_center_x, y_after_clock, COLOR_BLACK)
 
     # Sunrise / Sunset below date (contextual)
     sunrise_time = weather.get("sunrise")
@@ -521,9 +527,7 @@ def render_weather(
         except (ValueError, AttributeError):
             pass
         for line in sun_lines:
-            lw = _get_text_width(font_hourly_time, line)
-            lx = margin + (left_col_width - lw) // 2
-            draw_b.text((lx, sun_y), line, font=font_hourly_time, fill=COLOR_BLACK)
+            _draw_centered_text(draw_b, line, font_hourly_time, left_center_x, sun_y, COLOR_BLACK)
             sun_y += _get_font_height(font_hourly_time) + 3
 
     # ========================================================================
@@ -547,9 +551,12 @@ def render_weather(
     y_hourly_label = y_hourly_top - _get_font_height(font_hourly_time) - 30
     draw_b.text((margin, y_hourly_label), "HOURLY", font=font_hourly_time, fill=COLOR_BLACK)
 
-    # Check for upcoming bad weather and display warning in red
+    # Check for upcoming bad weather and display warning in red. Pass the live
+    # local time so the countdown matches the on-screen clock (not the API snapshot).
     from weather_dashboard.weather import get_upcoming_bad_weather
-    bad_weather = get_upcoming_bad_weather(weather, max_hours_ahead=2)
+    bad_weather = get_upcoming_bad_weather(
+        weather, max_hours_ahead=2, now_dt=_get_local_time(timezone_str)
+    )
     if bad_weather:
         minutes = bad_weather["minutes"]
         bw_text = f"{bad_weather['type']} in {minutes} min ({bad_weather['time']})"
@@ -577,16 +584,13 @@ def render_weather(
             black_img.putpixel((cx, icon_center_y), COLOR_BLACK)
 
         # Time label above icon
-        time_text = hour_label
-        tw = _get_text_width(font_hourly_time, time_text)
-        draw_b.text((x_base + (hour_block_width - tw) // 2, y_hourly_top - _get_font_height(font_hourly_time) - 4),
-                    time_text, font=font_hourly_time, fill=COLOR_BLACK)
+        _draw_centered_text(draw_b, hour_label, font_hourly_time, cx,
+                            y_hourly_top - _get_font_height(font_hourly_time) - 4, COLOR_BLACK)
 
         # Temperature below icon
         temp_text = f"{hour_temp}\u00b0"
-        tpw = _get_text_width(font_hourly_temp, temp_text)
-        draw_b.text((x_base + (hour_block_width - tpw) // 2, icon_center_y + icon_size // 2 + 4),
-                    temp_text, font=font_hourly_temp, fill=COLOR_BLACK)
+        _draw_centered_text(draw_b, temp_text, font_hourly_temp, cx,
+                            icon_center_y + icon_size // 2 + 4, COLOR_BLACK)
 
     # ========================================================================
     # TOP RIGHT: CURRENT WEATHER
@@ -602,36 +606,26 @@ def render_weather(
 
     # Large temperature (RED) below icon
     temp_y = icon_cy + icon_size_large // 2 - 10
-    temp_width = _get_text_width(font_temp_large, temp_str)
-    temp_x = right_col_x + (right_col_width - temp_width) // 2
-    draw_r.text((temp_x, temp_y), temp_str, font=font_temp_large, fill=COLOR_RED)
+    _draw_centered_text(draw_r, temp_str, font_temp_large, icon_cx, temp_y, COLOR_RED)
 
     # Condition text below temperature
     cond_y = temp_y + _get_font_height(font_temp_large) + 5
-    cond_width = _get_text_width(font_icon_label, condition_text)
-    cond_x = right_col_x + (right_col_width - cond_width) // 2
-    draw_b.text((cond_x, cond_y), condition_text, font=font_icon_label, fill=COLOR_BLACK)
+    _draw_centered_text(draw_b, condition_text, font_icon_label, icon_cx, cond_y, COLOR_BLACK)
 
     # Hi / Lo for today
     hi_lo_str = f"Hi {weather['today_high']:.0f}{unit_sym}   Lo {weather['today_low']:.0f}{unit_sym}"
     hilo_y = cond_y + _get_font_height(font_icon_label) + 8
-    hilo_width = _get_text_width(font_detail, hi_lo_str)
-    hilo_x = right_col_x + (right_col_width - hilo_width) // 2
-    draw_b.text((hilo_x, hilo_y), hi_lo_str, font=font_detail, fill=COLOR_BLACK)
+    _draw_centered_text(draw_b, hi_lo_str, font_detail, icon_cx, hilo_y, COLOR_BLACK)
 
     # Wind speed
     wind_str = f"Wind: {cur['wind_speed']:.0f} km/h"
     wind_y = hilo_y + _get_font_height(font_detail) + 5
-    wind_width = _get_text_width(font_detail, wind_str)
-    wind_x = right_col_x + (right_col_width - wind_width) // 2
-    draw_b.text((wind_x, wind_y), wind_str, font=font_detail, fill=COLOR_BLACK)
+    _draw_centered_text(draw_b, wind_str, font_detail, icon_cx, wind_y, COLOR_BLACK)
 
     # Feels like
     feels_str = f"Feels like: {cur['feels_like']:.0f}{unit_sym}"
     feels_y = wind_y + _get_font_height(font_detail) + 5
-    feels_width = _get_text_width(font_detail, feels_str)
-    feels_x = right_col_x + (right_col_width - feels_width) // 2
-    draw_b.text((feels_x, feels_y), feels_str, font=font_detail, fill=COLOR_BLACK)
+    _draw_centered_text(draw_b, feels_str, font_detail, icon_cx, feels_y, COLOR_BLACK)
 
     # ========================================================================
     # SEPARATORS
@@ -661,8 +655,7 @@ def render_weather(
         day_low = f"{day.get('low', '?'):.0f}{unit_sym}"
 
         # Day abbreviation (centered)
-        dw = _get_text_width(font_forecast_day, day_label)
-        draw_b.text((x_center - dw // 2, y_pos), day_label, font=font_forecast_day, fill=COLOR_BLACK)
+        _draw_centered_text(draw_b, day_label, font_forecast_day, x_center, y_pos, COLOR_BLACK)
 
         # Forecast icon (compressed vertically by ~1/3)
         _, day_icon = _condition_label_and_icon(day.get("weather_code", 0))
@@ -678,13 +671,11 @@ def render_weather(
 
         # High temp (red accent) below icon
         hi_y = icon_center_y + icon_size_medium // 2 + 2
-        hi_w = _get_text_width(font_forecast_temp, day_high)
-        draw_r.text((x_center - hi_w // 2, hi_y), day_high, font=font_forecast_temp, fill=COLOR_RED)
+        _draw_centered_text(draw_r, day_high, font_forecast_temp, x_center, hi_y, COLOR_RED)
 
         # Low temp below high (tighter gap)
         lo_y = hi_y + _get_font_height(font_forecast_temp) + 1
-        lo_w = _get_text_width(font_forecast_temp, day_low)
-        draw_b.text((x_center - lo_w // 2, lo_y), day_low, font=font_forecast_temp, fill=COLOR_BLACK)
+        _draw_centered_text(draw_b, day_low, font_forecast_temp, x_center, lo_y, COLOR_BLACK)
 
         # Column divider (not after last column)
         if i < num_days - 1 and i < 5:
@@ -698,7 +689,6 @@ def render_weather(
                     fill=COLOR_BLACK, thickness=1)
 
     footer_left = "Source: Open-Meteo"
-    flw = _get_text_width(font_footer, footer_left)
     draw_b.text((margin, footer_y), footer_left, font=font_footer, fill=COLOR_BLACK)
 
     # Timestamp on the right
@@ -708,9 +698,7 @@ def render_weather(
 
     # Stale data indicator (if needed)
     if stale:
-        stale_text = "!! STALE DATA !!"
-        stw = _get_text_width(font_detail, stale_text)
-        draw_r.text((WIDTH // 2 - stw // 2, footer_y), stale_text, font=font_detail, fill=COLOR_RED)
+        _draw_centered_text(draw_r, "!! STALE DATA !!", font_detail, WIDTH // 2, footer_y, COLOR_RED)
 
     return black_img, red_img
 
@@ -720,3 +708,19 @@ def render_blank() -> Tuple[Image.Image, Image.Image]:
     b = Image.new("1", (WIDTH, HEIGHT), COLOR_BG)
     r = Image.new("1", (WIDTH, HEIGHT), COLOR_BG)
     return b, r
+
+
+def compose_rgb(black_img: Image.Image, red_img: Image.Image) -> Image.Image:
+    """
+    Composite the black + red 1-bit buffers into one RGB image that looks like
+    the physical panel (white background, black ink, red ink).
+
+    Useful for previewing output on a machine without the display attached.
+    """
+    preview = Image.new("RGB", (WIDTH, HEIGHT), (255, 255, 255))
+    # In mode '1', ink pixels are 0; build masks that are 255 where ink is present.
+    black_mask = black_img.point(lambda p: 255 if p == COLOR_BLACK else 0).convert("1")
+    red_mask = red_img.point(lambda p: 255 if p == COLOR_RED else 0).convert("1")
+    preview.paste((0, 0, 0), (0, 0), black_mask)
+    preview.paste((210, 0, 0), (0, 0), red_mask)  # red drawn on top
+    return preview

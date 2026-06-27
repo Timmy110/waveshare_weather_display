@@ -32,8 +32,10 @@ def fetch_weather(
         "latitude": latitude,
         "longitude": longitude,
         "timezone": timezone,
-        "current": "temperature,relative_humidity_2m,apparent_temperature,wind_speed_10m,weather_code",
-        "hourly": "temperature,weather_code",
+        # Use the documented `temperature_2m` names (bare `temperature` is only a
+        # legacy alias and is not guaranteed by the API).
+        "current": "temperature_2m,apparent_temperature,wind_speed_10m,weather_code",
+        "hourly": "temperature_2m,weather_code",
         "daily": "weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset",
         "temperature_unit": unit,
         # We want today + 5 more days = 6 days from API (skip today for 5 forecast days)
@@ -97,9 +99,14 @@ BAD_WEATHER_CODES = {
 def get_upcoming_bad_weather(
     weather: Dict[str, Any],
     max_hours_ahead: int = 2,
+    now_dt: Optional[datetime] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Check hourly forecast for bad weather within the next `max_hours_ahead` hours.
+
+    `now_dt` should be the live local time; pass it from the caller so the
+    countdown matches the on-screen clock rather than the (possibly stale) API
+    snapshot. Falls back to the cached `current.local_time` if not supplied.
 
     Returns None if no bad weather expected, otherwise a dict like:
         {
@@ -112,45 +119,47 @@ def get_upcoming_bad_weather(
     if not hourly:
         return None
 
-    now_str = weather.get("current", {}).get("local_time")
-    if not now_str:
-        return None
+    if now_dt is None:
+        now_str = weather.get("current", {}).get("local_time")
+        if not now_str:
+            return None
+        try:
+            now_dt = datetime.fromisoformat(now_str)
+        except (ValueError, TypeError):
+            return None
 
-    try:
-        now_dt = datetime.fromisoformat(now_str)
-    except (ValueError, TypeError):
-        return None
+    # Compare on naive local wall-clock time (hourly timestamps are naive local).
+    now_dt = now_dt.replace(tzinfo=None)
 
     for hour_data in hourly:
-        hour_str = hour_data.get("hour", "")
         code = hour_data.get("weather_code", 0)
-
         if code not in BAD_WEATHER_CODES:
             continue
 
+        # Prefer the full ISO timestamp; fall back to legacy HH:MM entries.
+        time_iso = hour_data.get("time")
         try:
-            hour_dt = datetime.strptime(hour_str, "%H:%M")
-            # Build full datetime for comparison (same date as now)
-            hour_full = hour_dt.replace(
-                year=now_dt.year, month=now_dt.month, day=now_dt.day
-            )
-            # If hour is before now, assume it's tomorrow -> skip
-            if hour_full < now_dt:
-                continue
-
-            diff = hour_full - now_dt
-            total_minutes = int(diff.total_seconds() / 60)
-
-            if total_minutes <= max_hours_ahead * 60:
-                # Capitalize the first letter of the weather type
-                weather_type = BAD_WEATHER_CODES[code]
-                return {
-                    "type": weather_type.capitalize(),
-                    "minutes": total_minutes,
-                    "time": hour_str,
-                }
+            if time_iso:
+                hour_full = datetime.fromisoformat(time_iso)
+            else:
+                hour_dt = datetime.strptime(hour_data.get("hour", ""), "%H:%M")
+                hour_full = hour_dt.replace(
+                    year=now_dt.year, month=now_dt.month, day=now_dt.day
+                )
         except (ValueError, TypeError):
             continue
+
+        # Skip hours already in the past.
+        if hour_full < now_dt:
+            continue
+
+        total_minutes = int((hour_full - now_dt).total_seconds() / 60)
+        if total_minutes <= max_hours_ahead * 60:
+            return {
+                "type": BAD_WEATHER_CODES[code].capitalize(),
+                "minutes": total_minutes,
+                "time": hour_full.strftime("%H:%M"),
+            }
 
     return None
 
@@ -174,12 +183,11 @@ def _parse_openmeto_response(data: Dict[str, Any], unit: str) -> Dict[str, Any]:
 
     # Build hourly forecast — select next ~8 hours starting from current hour
     hourly_forecast = []
-    if hourly.get("time") and hourly.get("temperature"):
+    if hourly.get("time") and hourly.get("temperature_2m"):
         now_hour = None
         if local_time:
             now_hour = local_time.hour
-            now_date = local_time.date()
-        
+
         # Find the index of the closest future hour
         start_idx = 0
         for i, t in enumerate(hourly["time"]):
@@ -193,8 +201,11 @@ def _parse_openmeto_response(data: Dict[str, Any], unit: str) -> Dict[str, Any]:
             t_str = hourly["time"][i]
             h_dt = datetime.strptime(t_str, "%Y-%m-%dT%H:%M")
             hourly_forecast.append({
+                # Full ISO timestamp for correct cross-midnight comparison; `hour`
+                # is the display-only HH:MM label.
+                "time": h_dt.isoformat(),
                 "hour": h_dt.strftime("%H:%M"),
-                "temperature": hourly["temperature"][i],
+                "temperature": hourly["temperature_2m"][i],
                 "weather_code": hourly["weather_code"][i],
             })
 
@@ -230,7 +241,7 @@ def _parse_openmeto_response(data: Dict[str, Any], unit: str) -> Dict[str, Any]:
 
     result = {
         "current": {
-            "temperature": current["temperature"],
+            "temperature": current["temperature_2m"],
             "feels_like": current["apparent_temperature"],
             "wind_speed": current["wind_speed_10m"],
             "weather_code": current["weather_code"],
