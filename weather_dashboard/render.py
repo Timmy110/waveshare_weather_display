@@ -396,11 +396,13 @@ def render_clock_region(
     changes once a day — the 15-minute full refresh repaints it.
 
     NOTE: partial refresh on this 3-color (B/W/R) panel is experimental. The
-    driver pushes the partial buffer on the second RAM plane (0x13), so the
-    updated digits may render on the red channel and/or leave faint ghosting
-    until the next full refresh clears it. Verify on the physical panel; if the
-    result is poor, set ``time_update_mode: "fast"`` in config to fall back to a
-    whole-screen fast refresh instead. Pair with clock_partial_buffer().
+    digits are pushed via ``EPD.display_Partial_clear()``, which seeds the old
+    RAM plane with the inverse of this buffer so the whole (tight) window
+    repaints as B/W and the previous time is cleared rather than left underneath.
+    Some faint ghosting may still remain until the next full refresh. Verify on
+    the physical panel; if the result is poor, set ``time_update_mode: "fast"``
+    in config to fall back to a whole-screen fast refresh instead. Pair with
+    clock_partial_buffer().
     """
     if not (font_path and os.path.isfile(font_path)):
         font_path = _default_font_path()
@@ -412,12 +414,18 @@ def render_clock_region(
     now_dt = _get_local_time(timezone_str)
     clock_display = now_dt.strftime("%H:%M")
 
-    # Byte-align the horizontal bounds to the enclosing left column so the
-    # driver's own alignment in display_Partial() is a no-op (x0 down, x1 up to
-    # the next multiple of 8). The panel packs 8 horizontal pixels per byte.
-    x0 = (CLOCK_MARGIN // 8) * 8
-    right = CLOCK_MARGIN + CLOCK_LEFT_COL_WIDTH
-    x1 = -(-right // 8) * 8   # ceil-divide to next multiple of 8
+    # Size the box to the digits, NOT the whole left column — a tight window
+    # means far less area for the panel to drive (and ghost). Measure the widest
+    # possible HH:MM ("88:88") rather than the current value so the window stays
+    # a constant size every minute: a fixed window ghosts less than one that
+    # grows and shrinks tick to tick, and always encloses the shared center.
+    #
+    # Byte-align the horizontal bounds (x0 down, x1 up to the next multiple of 8)
+    # so the driver's own alignment in display_Partial() is a no-op. The panel
+    # packs 8 horizontal pixels per byte.
+    half_w = _get_text_width(font_clock, "88:88") // 2 + 12   # 12px side padding
+    x0 = max(0, ((CLOCK_CENTER_X - half_w) // 8) * 8)
+    x1 = -(-(CLOCK_CENTER_X + half_w) // 8) * 8   # ceil-divide to next multiple of 8
     y0 = CLOCK_Y
     y1 = y0 + _get_font_height(font_clock) + 8
 

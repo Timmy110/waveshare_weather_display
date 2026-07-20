@@ -153,7 +153,12 @@ def _send_partial_clock(epd_module, region_img, region):
         raise RuntimeError(f"e-Paper init_part failed with code {init_result}")
     x0, y0, x1, y1 = region
     logger.info("Partial-refreshing clock region %s ...", region)
-    epd.display_Partial(clock_partial_buffer(region_img), x0, y0, x1, y1)
+    # display_Partial_clear seeds the old plane with the inverse of the new
+    # digits so the whole (small) window repaints and the previous time is
+    # cleared — a plain display_Partial() leaves the old digits underneath
+    # because each per-minute run is an isolated init_part/sleep cycle with no
+    # valid old frame on the panel.
+    epd.display_Partial_clear(clock_partial_buffer(region_img), x0, y0, x1, y1)
     logger.info("Partial clock update complete")
     return epd
 

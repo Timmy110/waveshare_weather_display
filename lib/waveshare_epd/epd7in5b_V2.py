@@ -284,7 +284,58 @@ class EPD:
         self.send_command(0x12)
         epdconfig.delay_ms(100)
         self.ReadBusy()
-        
+
+    def display_Partial_clear(self, Image, Xstart, Ystart, Xend, Yend):
+        """
+        Partial refresh that fully repaints its window (clears whatever was
+        underneath) even when the panel has no valid "old" frame — e.g. when
+        each update is a separate short-lived process that init_part()s and
+        sleep()s around a single call, so the usual old/new RAM continuity is
+        gone.
+
+        Trick: seed the "old" plane (0x10) with the exact inverse of the new
+        image. Every pixel then transitions (white->black or black->white), so
+        the partial waveform drives the entire window rather than only the
+        pixels whose value happens to differ from a blanket base fill. Old
+        digits are driven back to white; new digits are driven to black.
+
+        ``Image`` is a B/W partial buffer (0xFF = black, 0x00 = white) whose
+        length is (width // 8) * height for the byte-aligned window. Callers
+        should pass an already byte-aligned window (Xstart/Xend multiples of 8)
+        so no rounding desyncs the buffer.
+        """
+        Xstart = Xstart // 8 * 8
+        if Xend % 8 != 0:
+            Xend = Xend // 8 * 8 + 1
+        else:
+            Xend = Xend // 8 * 8
+
+        self.send_command(0x91)		#This command makes the display enter partial mode
+        self.send_command(0x90)		#resolution setting
+        self.send_data (Xstart//256)
+        self.send_data (Xstart%256)   #x-start
+        self.send_data ((Xend-1)//256)
+        self.send_data ((Xend-1)%256)  #x-end
+        self.send_data (Ystart//256)  #
+        self.send_data (Ystart%256)   #y-start
+        self.send_data ((Yend-1)//256)
+        self.send_data ((Yend-1)%256)  #y-end
+        self.send_data (0x01)
+
+        # Old plane = inverse of new -> guarantees a transition on every pixel.
+        old = bytearray(Image)
+        for i in range(len(old)):
+            old[i] ^= 0xFF
+        self.send_command(0x10)   #Write "old" Black and White image to RAM
+        self.send_data2(old)
+
+        self.send_command(0x13)   #Write "new" Black and White image to RAM
+        self.send_data2(Image)
+
+        self.send_command(0x12)
+        epdconfig.delay_ms(100)
+        self.ReadBusy()
+
     def Clear(self):
         buf = [0x00] * (int(self.width/8) * self.height)
         buf2 = [0xff] * (int(self.width/8) * self.height)
