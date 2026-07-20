@@ -9,6 +9,7 @@ A Python script that fetches current weather from [Open-Meteo](https://open-mete
 - 5-day forecast strip with per-day highs/lows and weather icons
 - Smart refresh: only updates the display when data actually changes (saves e-ink panel wear)
 - Forced full-refresh every N runs (configurable, default: 24) to prevent image ghosting
+- Per-minute clock updates via `--time-only` (partial refresh of just the clock digits)
 - Stale-data fallback: if the API is unreachable, redraws last known good data with a red warning badge
 - Debug PNG images saved to cache directory for inspection without physical hardware
 
@@ -20,7 +21,7 @@ A Python script that fetches current weather from [Open-Meteo](https://open-mete
 | Display | Waveshare 7.5inch E-Paper HAT (B) — **3-color variant** (`epd7in5b_V2`) |
 | Resolution | 800 × 480 (landscape) |
 
-> **Note:** The bundled `epd7in5b_V2` driver *does* provide `init_part()` / `display_Partial()`, but this script deliberately does **not** use them: partial refresh on the 3-color (B/W/Red) panel is experimental and prone to red-channel ghosting, and `display_Partial()` only updates a single RAM buffer. "Smart refresh" here means *skipping the draw entirely* when nothing changed, and using a fast full refresh otherwise. `render_clock_region()` is kept as a building block should a future version wire up true partial refresh.
+> **Note on partial refresh:** The `--time-only` run uses the bundled driver's `init_part()` / `display_Partial()` to repaint just the clock digits every minute without a full-screen flash. Partial refresh on this 3-color (B/W/Red) panel is **experimental**: `display_Partial()` writes to a single RAM plane (0x13), so the updated digits may render on the red channel and/or leave faint ghosting until the next full refresh clears it. If the result looks bad on your panel, set `"time_update_mode": "fast"` in config to repaint the whole screen with a fast refresh each minute instead (no ghosting, brief flash). The weather portion still uses "smart refresh" — skipping the draw entirely when nothing changed, full refresh otherwise.
 
 ## Installation
 
@@ -66,7 +67,8 @@ Edit `config.json`:
     "cache_dir": "cache",
     "full_refresh_interval": 24,
     "api_timeout_seconds": 10,
-    "font_path": null
+    "font_path": null,
+    "time_update_mode": "partial"
 }
 ```
 
@@ -79,6 +81,7 @@ Edit `config.json`:
 | `full_refresh_interval` | Force a full panel refresh every N runs (default 24) |
 | `api_timeout_seconds` | HTTP timeout for Open-Meteo requests |
 | `font_path` | Optional absolute path to a `.ttf`/`.ttc` file. `null` = auto-detect. |
+| `time_update_mode` | How `--time-only` repaints the clock: `"partial"` (default, partial refresh of the clock digits, flash-free) or `"fast"` (whole-screen fast refresh from cached weather, no ghosting but flashes). |
 
 ## Usage
 
@@ -91,6 +94,20 @@ The script will:
 2. Compare with the last rendered data
 3. Update the display **only** if data changed or the periodic refresh threshold was reached
 4. Put the panel to sleep and exit (code 0 = success, non-zero = error)
+
+### Update only the clock (per-minute)
+
+```bash
+python3 weather_dashboard.py --time-only
+```
+
+Repaints just the clock — no network fetch, no cache writes. Run this every
+minute alongside a normal (full) run every ~15 minutes: the full run handles
+weather and repaints the whole screen (clearing any partial-refresh ghosting),
+while `--time-only` keeps the minutes ticking cheaply in between. Behaviour is
+controlled by `time_update_mode` (see config table). Concurrent runs are
+serialized with a lock file (`cache/panel.lock`) so the two schedules never
+drive the SPI bus at the same time.
 
 ### Override config path
 
@@ -122,7 +139,20 @@ rather than a bare filename that lands in the project root.
 
 ### Option A: cron
 
-Edit crontab (`crontab -e`) and add a line like this to run every 30 minutes:
+Edit crontab (`crontab -e`). To get a **per-minute clock + weather every 15 minutes**,
+add two lines — one full run, one `--time-only` run:
+
+```cron
+# Weather + full redraw every 15 minutes
+*/15 * * * * cd /home/pi/waveshare_weather_display && python3 weather_dashboard.py >> /var/log/weather_dashboard.log 2>&1
+# Clock only, every minute
+* * * * * cd /home/pi/waveshare_weather_display && python3 weather_dashboard.py --time-only >> /var/log/weather_dashboard.log 2>&1
+```
+
+At `:00`, `:15`, `:30`, `:45` both jobs fire; the `cache/panel.lock` file makes the
+`--time-only` job wait for the full run to finish (the full run repaints the clock
+anyway). For a simpler once-every-30-minutes setup with no per-minute clock, use a
+single line:
 
 ```cron
 */30 * * * * cd /home/pi/waveshare_weather_display && python3 weather_dashboard.py >> /var/log/weather_dashboard.log 2>&1
@@ -156,6 +186,11 @@ OnUnitActiveSec=30min
 [Install]
 WantedBy=timers.target
 ```
+
+For the per-minute clock, add a second oneshot service that runs with
+`--time-only` (`ExecStart=... weather_dashboard.py --time-only`) plus a timer with
+`OnCalendar=*:0/1` (every minute). The `cache/panel.lock` file keeps it from
+colliding with the 15-minute weather run.
 
 Enable and start:
 

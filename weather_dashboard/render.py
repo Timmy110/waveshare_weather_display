@@ -30,6 +30,15 @@ COLOR_BG = 255       # white background
 COLOR_BLACK = 0      # black ink (active pixel in black buffer)
 COLOR_RED = 0        # red ink (active pixel in red buffer)
 
+# --- Clock layout (SHARED by the full render and the partial clock region) --
+# Keeping these in one place guarantees the per-minute partial refresh paints
+# the time at exactly the same spot the full render does — otherwise the clock
+# would visibly jump between the two refresh paths.
+CLOCK_MARGIN = 15
+CLOCK_LEFT_COL_WIDTH = 560
+CLOCK_CENTER_X = CLOCK_MARGIN + CLOCK_LEFT_COL_WIDTH // 2   # horizontal center (295)
+CLOCK_Y = CLOCK_MARGIN + 5                                  # top of the clock text (20)
+
 # --- Weather code mapping ---------------------------------------------------
 # WMO weather interpretation codes -> (text label, icon name)
 # https://open-meteo.com/en/docs#weather+codes
@@ -371,51 +380,80 @@ def _round_up_to_5min(dt: datetime) -> datetime:
 def render_clock_region(
     timezone_str: str = "Europe/Paris",
     font_path: Optional[str] = None,
-) -> Tuple[Image.Image, Image.Image, Tuple[int, int, int, int]]:
+) -> Tuple[Image.Image, Tuple[int, int, int, int]]:
     """
-    Render only the clock + date region for a partial e-paper refresh.
+    Render just the HH:MM clock digits for a partial e-paper refresh.
 
-    Returns (black_img, red_img, region) where `region` is the (x0, y0, x1, y1)
-    pixel box — matching the full-render clock block — so a caller can blit it
-    via display_Partial(). NOTE: the bundled epd7in5b_V2 driver does expose
-    init_part()/display_Partial(), but partial refresh on this 3-color panel is
-    experimental and prone to red-channel ghosting; the main loop currently uses
-    a fast full refresh instead. This helper is kept for that future path.
+    Returns ``(region_img, region)`` where:
+      - ``region`` is the (x0, y0, x1, y1) panel-pixel box the caller passes to
+        ``epd.display_Partial()``. x0/x1 are byte-aligned (multiples of 8) so the
+        driver does not silently round them and desync from ``region_img``.
+      - ``region_img`` is a 1-bit PIL image sized exactly ``(x1-x0, y1-y0)`` with
+        the clock centered on the SAME panel coordinate the full render uses.
+
+    Only the digits are covered (not the date/sunrise lines below): a smaller
+    partial window means less area for the panel to ghost, and the date only
+    changes once a day — the 15-minute full refresh repaints it.
+
+    NOTE: partial refresh on this 3-color (B/W/R) panel is experimental. The
+    driver pushes the partial buffer on the second RAM plane (0x13), so the
+    updated digits may render on the red channel and/or leave faint ghosting
+    until the next full refresh clears it. Verify on the physical panel; if the
+    result is poor, set ``time_update_mode: "fast"`` in config to fall back to a
+    whole-screen fast refresh instead. Pair with clock_partial_buffer().
     """
     if not (font_path and os.path.isfile(font_path)):
         font_path = _default_font_path()
     if font_path and os.path.isfile(font_path):
         font_clock = _load_font(font_path, 96)
-        font_hourly_time = _load_font(font_path, 20)
     else:
         font_clock = _load_font(None, 36)
-        font_hourly_time = _load_font(None, 14)
 
     now_dt = _get_local_time(timezone_str)
     clock_display = now_dt.strftime("%H:%M")
-    date_display = now_dt.strftime("%a, %b %d")
 
-    # Region bounds matching full render layout
-    margin = 15
-    left_col_width = 560
-    y_clock = margin + 5
-    clock_height_region = _get_font_height(font_clock) + 5 + _get_font_height(font_hourly_time)
+    # Byte-align the horizontal bounds to the enclosing left column so the
+    # driver's own alignment in display_Partial() is a no-op (x0 down, x1 up to
+    # the next multiple of 8). The panel packs 8 horizontal pixels per byte.
+    x0 = (CLOCK_MARGIN // 8) * 8
+    right = CLOCK_MARGIN + CLOCK_LEFT_COL_WIDTH
+    x1 = -(-right // 8) * 8   # ceil-divide to next multiple of 8
+    y0 = CLOCK_Y
+    y1 = y0 + _get_font_height(font_clock) + 8
 
-    region = (margin, y_clock, margin + left_col_width, y_clock + clock_height_region)
-    rx, ry, rx2, ry2 = region
-    rw = rx2 - rx
-    rh = ry2 - ry
+    region = (x0, y0, x1, y1)
+    rw = x1 - x0
+    rh = y1 - y0
 
-    black_img = Image.new("1", (rw, rh), COLOR_BG)
-    red_img = Image.new("1", (rw, rh), COLOR_BG)
-    draw_b = ImageDraw.Draw(black_img)
+    region_img = Image.new("1", (rw, rh), COLOR_BG)
+    draw_b = ImageDraw.Draw(region_img)
+    # Draw at the shared panel center, translated into region-local coordinates.
+    _draw_centered_text(draw_b, clock_display, font_clock, CLOCK_CENTER_X - x0, 0, COLOR_BLACK)
 
-    _draw_centered_text(draw_b, clock_display, font_clock, rw // 2, 0, COLOR_BLACK)
+    return region_img, region
 
-    y_date = _get_font_height(font_clock) + 5
-    _draw_centered_text(draw_b, date_display, font_hourly_time, rw // 2, y_date, COLOR_BLACK)
 
-    return black_img, red_img, region
+def clock_partial_buffer(region_img: Image.Image) -> bytearray:
+    """
+    Pack a clock region image (from render_clock_region) into the byte buffer
+    ``epd.display_Partial()`` expects.
+
+    Mirrors the panel convention used by ``EPD.getbuffer()``: 1 bit per pixel,
+    MSB first, rows packed left-to-right, with ink pixels = bit 1. The region
+    width MUST be a multiple of 8 so PIL adds no per-row padding and the buffer
+    length equals ``(width // 8) * height`` — exactly what display_Partial reads.
+    """
+    if region_img.mode != "1":
+        region_img = region_img.convert("1")
+    w, _ = region_img.size
+    if w % 8 != 0:
+        raise ValueError(f"clock region width must be a multiple of 8, got {w}")
+    # PIL '1' -> tobytes packs bit 1 = white(255). The panel wants bit 1 = ink,
+    # so invert, matching EPD.getbuffer().
+    buf = bytearray(region_img.tobytes("raw"))
+    for i in range(len(buf)):
+        buf[i] ^= 0xFF
+    return buf
 
 
 def render_weather(
@@ -490,15 +528,17 @@ def render_weather(
     # ========================================================================
     # TOP LEFT: CLOCK (top-aligned)
     # ========================================================================
-    y_clock = margin + 5
+    y_clock = CLOCK_Y
 
-    # Display live local time rounded up to next 5-minute mark (update interval)
-    now_dt = _round_up_to_5min(_get_local_time(timezone_str))
+    # Display the live local time to the current minute. The clock is refreshed
+    # every minute (partial refresh); render_clock_region() must agree with the
+    # value/placement used here, hence the shared CLOCK_* constants.
+    now_dt = _get_local_time(timezone_str)
     clock_display = now_dt.strftime("%H:%M")
     date_display = now_dt.strftime("%a, %b %d")
 
     # Center the clock within the left column
-    left_center_x = margin + left_col_width // 2
+    left_center_x = CLOCK_CENTER_X
     _draw_centered_text(draw_b, clock_display, font_clock, left_center_x, y_clock, COLOR_BLACK)
     y_after_clock = y_clock + _get_font_height(font_clock) + 5
 
