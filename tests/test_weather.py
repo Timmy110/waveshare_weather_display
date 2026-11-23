@@ -246,3 +246,37 @@ def test_aqi_labels():
     assert aqi_label(15) == "Good"
     assert aqi_label(48) == "Moderate"
     assert aqi_label(130) == "Extreme"
+
+
+def test_get_json_encodes_params_and_parses(monkeypatch):
+    import io
+    from weather_dashboard import weather
+
+    seen = {}
+
+    class _Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout):
+        seen["url"], seen["timeout"] = req.full_url, timeout
+        return _Resp(b'{"ok": 1}')
+
+    monkeypatch.setattr(weather.urllib.request, "urlopen", fake_urlopen)
+    assert weather._get_json("https://x.test/a", {"q": "a,b", "n": 2}, 7) == {"ok": 1}
+    assert seen["url"] == "https://x.test/a?q=a%2Cb&n=2"
+    assert seen["timeout"] == 7
+
+
+def test_fetch_weather_returns_none_on_network_error(monkeypatch):
+    from weather_dashboard import weather
+
+    def boom(*a, **k):
+        raise OSError("network down")
+
+    monkeypatch.setattr(weather, "_get_json", boom)
+    assert weather.fetch_weather(50.0, 3.0, "Europe/Brussels", "celsius") is None
+    assert weather.fetch_air_quality(50.0, 3.0, "Europe/Brussels") is None

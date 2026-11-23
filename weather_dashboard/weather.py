@@ -1,13 +1,29 @@
 #!/usr/bin/env python3
 """Fetch weather data from Open-Meteo API."""
 
+import json
 import logging
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 
-import requests
-
 logger = logging.getLogger(__name__)
+
+
+def _get_json(url: str, params: Dict[str, Any], timeout: float) -> Any:
+    """
+    GET `url` with query `params` and decode the JSON body.
+
+    Uses the standard library rather than `requests`: importing `requests`
+    alone costs ~0.85 s on a Pi Zero 2 W — a third of a whole run.
+    Raises OSError on network/HTTP errors (urllib's URLError and HTTPError
+    are OSError subclasses, as is a timeout) and ValueError on bad JSON.
+    """
+    full = f"{url}?{urllib.parse.urlencode(params)}"
+    req = urllib.request.Request(full, headers={"User-Agent": "waveshare-weather-dashboard"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
 
 
 def fetch_weather(
@@ -51,10 +67,8 @@ def fetch_weather(
 
     try:
         logger.info("Fetching weather from Open-Meteo ...")
-        resp = requests.get(url, params=params, timeout=timeout)
-        resp.raise_for_status()
-        data = resp.json()
-    except requests.RequestException as exc:
+        data = _get_json(url, params, timeout)
+    except OSError as exc:
         logger.error("Open-Meteo request failed: %s", exc)
         return None
     except ValueError as exc:
@@ -83,16 +97,15 @@ def fetch_air_quality(
 ) -> Optional[int]:
     """Current European AQI (0 = clean, 100+ = extremely poor), or None on failure."""
     try:
-        resp = requests.get(
+        data = _get_json(
             "https://air-quality-api.open-meteo.com/v1/air-quality",
-            params={"latitude": latitude, "longitude": longitude,
-                    "timezone": timezone, "current": "european_aqi"},
-            timeout=timeout,
+            {"latitude": latitude, "longitude": longitude,
+             "timezone": timezone, "current": "european_aqi"},
+            timeout,
         )
-        resp.raise_for_status()
-        value = resp.json()["current"]["european_aqi"]
+        value = data["current"]["european_aqi"]
         return None if value is None else int(round(value))
-    except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
+    except (OSError, ValueError, KeyError, TypeError) as exc:
         logger.warning("Air-quality fetch failed (shown as '-'): %s", exc)
         return None
 
