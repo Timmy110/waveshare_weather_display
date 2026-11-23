@@ -334,6 +334,9 @@ def render_weather(
     Red marks the sun and warmth (sun icons, the temperature line, UV) and
     alerts; greys are rendered as ordered dither.
 
+    Small text uses Medium or heavier: on a 1-bit panel a Regular weight at
+    12-19px gets 1px stems that rasterise unevenly and look soft.
+
     Returns two PIL images in mode '1' (1-bit), ready for epd.getbuffer().
     """
     font = _font_loader(font_path)
@@ -355,11 +358,11 @@ def render_weather(
     if title:
         f_title = _fit_font(lambda s: font(s, "semibold"), title, WIDTH - 200, 32, 22)
         _text(draw_b, title, f_title, WIDTH // 2, 14, COLOR_BLACK, align="center")
-    _text(draw_b, _format_date(now_local), font(19), WIDTH // 2, 54 if title else 22,
+    _text(draw_b, _format_date(now_local), font(19, "medium"), WIDTH // 2, 54 if title else 22,
           COLOR_BLACK, align="center")
 
     # Freshness stamp, tucked in the corner
-    f_stamp = font(12)
+    f_stamp = font(12, "medium")
     stamp = f"Updated {now_local.strftime('%H:%M')}"
     sw, _ = _text(draw_b, stamp, f_stamp, WIDTH - 12, 10, COLOR_BLACK, align="right")
     if stale:
@@ -384,11 +387,11 @@ def render_weather(
 
     condition, _ = _condition_label_and_icon(cur["weather_code"])
     y = temp_top + th + 16
-    f_sub = font(18)
+    f_sub = font(18, "medium")
     _, h = _text(draw_b, f"Feels like {_num(cur['feels_like'])}°", f_sub, TEMP_CX, y,
                  COLOR_BLACK, align="center")
     y += h + 10
-    f_cond = _fit_font(lambda s: font(s, "medium"), condition, 200, 17, 13)
+    f_cond = _fit_font(lambda s: font(s, "semibold"), condition, 200, 17, 13)
     _, h = _text(draw_b, condition, f_cond, TEMP_CX, y, COLOR_BLACK, align="center")
 
     alert = _bad_weather_text(weather, now_local)
@@ -410,7 +413,7 @@ def render_weather(
         ("visibility", "Visibility", vis_v, vis_u, {}),
         ("air_quality", "Air Quality", str(aqi) if aqi is not None else "-", aqi_label(aqi), {"value": aqi}),
     ]
-    f_label, f_value, f_vunit = font(14), font(21, "semibold"), font(12)
+    f_label, f_value, f_vunit = font(14, "medium"), font(21, "semibold"), font(12, "medium")
     for i, (icon, label, value, unit, kw) in enumerate(metrics):
         icon_cx, text_cx = GRID_COLS[i % 2]
         row_cy = GRID_TOP + (i // 2) * GRID_ROW
@@ -437,7 +440,7 @@ def render_weather(
     if days:
         n = len(days)
         card_w = (WIDTH - 2 * MARGIN - (n - 1) * CARD_GAP) / n
-        f_day, f_range = font(17, "semibold"), font(15)
+        f_day, f_range = font(18, "medium"), font(15, "medium")
         for i, d in enumerate(days):
             x0 = int(MARGIN + i * (card_w + CARD_GAP))
             x1 = int(x0 + card_w)
@@ -487,7 +490,7 @@ def _draw_chart(black_img, red_img, draw_b, draw_r, series: List[Dict[str, Any]]
         if bw <= 0 or bh <= 0:
             continue
         red_img.paste(255, (bx0, by0, bx1, y1))
-        black_img.paste(0, (bx0, by0), dither_mask(0.375, bx0, by0, bw, bh))
+        black_img.paste(0, (bx0, by0), dither_mask(0.5, bx0, by0, bw, bh))
         draw_b.line([(bx0, by0), (bx1 - 1, by0)], fill=COLOR_BLACK)
 
     # Temperature line on top (clear black underneath so red stays clean)
@@ -495,7 +498,7 @@ def _draw_chart(black_img, red_img, draw_b, draw_r, series: List[Dict[str, Any]]
     draw_r.line(pts, fill=COLOR_RED, width=2)
 
     # Axes labels: temperature range left, probability range right
-    f_axis = font(12)
+    f_axis = font(12, "medium")
     _text(draw_b, f"{hi}°", f_axis, x0 - 8, y0 - 2, COLOR_BLACK, align="right")
     _text(draw_b, f"{lo}°", f_axis, x0 - 8, y1 - 9, COLOR_BLACK, align="right")
     _text(draw_b, "100%", f_axis, x1 + 8, y0 - 2, COLOR_BLACK)

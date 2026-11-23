@@ -5,7 +5,10 @@ Icons are drawn as filled shapes (the look of colour e-paper dashboards) and
 translated to the panel's three inks:
   - solid red          — sun, UV, lightning, the "bad" end of gauges
   - dithered black     — greys (clouds, moon, droplet), via an ordered Bayer
-                         pattern aligned to the panel grid so shades tile cleanly
+                         pattern aligned to the panel grid so shades tile cleanly.
+                         Use only 1/8, 1/4, 1/2 or 3/4: those levels form regular
+                         grids; in-between levels (e.g. 0.62) give an uneven,
+                         noisy texture that looks blurry on the panel.
   - solid black        — outlines, rain, snow, fog bars, line icons
 
 Shapes are drawn 4x supersampled in unit coordinates (0..1 of the icon box)
@@ -142,7 +145,7 @@ def _partly_cloudy_night(c: _Canvas, **_):
 
 
 def _cloud(c: _Canvas, **_):
-    back = _Layer(c.cloud(0.0, 0.10, 0.66), "black", 0.62, outline=1)
+    back = _Layer(c.cloud(0.0, 0.10, 0.66), "black", 0.5, outline=1)
     return _behind_cloud(c, [back], c.cloud(0.24, 0.27, 0.74), 0.25)
 
 
@@ -168,7 +171,7 @@ def _thunder(c: _Canvas, **_):
     m, d = c.new()
     bolt = [(0.56, 0.44), (0.36, 0.72), (0.50, 0.72), (0.42, 0.97), (0.68, 0.62), (0.53, 0.62), (0.62, 0.44)]
     d.polygon([(c.px(x), c.px(y)) for x, y in bolt], fill=255)
-    cloud = _cloud_top(c, 0.62)
+    cloud = _cloud_top(c, 0.5)
     cloud.mask = _minus(cloud.mask, c.grow(m, 0.03))
     return [cloud, _Layer(m, "red")]
 
