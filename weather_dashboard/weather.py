@@ -18,7 +18,9 @@ def fetch_weather(
     timeout: int = 10,
 ) -> Optional[Dict[str, Any]]:
     """
-    Fetch current weather + 5-day forecast from Open-Meteo.
+    Fetch current weather + 7-day forecast from Open-Meteo, plus the current
+    air-quality index from Open-Meteo's separate air-quality API (optional:
+    if that call fails the dashboard just shows a dash).
 
     Returns a dict with the structure expected by the renderer, or None on failure.
     """
@@ -34,14 +36,17 @@ def fetch_weather(
         "timezone": timezone,
         # Use the documented `temperature_2m` names (bare `temperature` is only a
         # legacy alias and is not guaranteed by the API).
-        "current": "temperature_2m,apparent_temperature,wind_speed_10m,weather_code",
-        "hourly": "temperature_2m,weather_code",
+        "current": (
+            "temperature_2m,apparent_temperature,wind_speed_10m,wind_direction_10m,"
+            "weather_code,relative_humidity_2m,pressure_msl,visibility,uv_index"
+        ),
+        "hourly": "temperature_2m,weather_code,precipitation_probability",
         # 15-minute resolution for near-term precipitation timing (e.g. "rain in 40 min").
         "minutely_15": "weather_code,precipitation,precipitation_probability",
         "daily": "weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset",
         "temperature_unit": unit,
-        # We want today + 5 more days = 6 days from API (skip today for 5 forecast days)
-        "forecast_days": 6,
+        # Today + 7 more days (today is shown as "now"; the 7 after it as cards)
+        "forecast_days": 8,
     }
 
     try:
@@ -62,6 +67,8 @@ def fetch_weather(
         logger.error("Malformed Open-Meteo response: %s", exc)
         return None
 
+    result["air_quality"] = fetch_air_quality(latitude, longitude, timezone, timeout)
+
     logger.info(
         "Weather fetched OK — temp=%.1f°%s, code=%s",
         result["current"]["temperature"],
@@ -69,6 +76,38 @@ def fetch_weather(
         result["current"]["weather_code"],
     )
     return result
+
+
+def fetch_air_quality(
+    latitude: float, longitude: float, timezone: str, timeout: int = 10,
+) -> Optional[int]:
+    """Current European AQI (0 = clean, 100+ = extremely poor), or None on failure."""
+    try:
+        resp = requests.get(
+            "https://air-quality-api.open-meteo.com/v1/air-quality",
+            params={"latitude": latitude, "longitude": longitude,
+                    "timezone": timezone, "current": "european_aqi"},
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        value = resp.json()["current"]["european_aqi"]
+        return None if value is None else int(round(value))
+    except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
+        logger.warning("Air-quality fetch failed (shown as '-'): %s", exc)
+        return None
+
+
+# European AQI bands -> short label
+_AQI_BANDS = [(20, "Good"), (40, "Fair"), (60, "Moderate"), (80, "Poor"), (100, "Very poor")]
+
+
+def aqi_label(aqi: Optional[int]) -> str:
+    if aqi is None:
+        return ""
+    for limit, label in _AQI_BANDS:
+        if aqi <= limit:
+            return label
+    return "Extreme"
 
 
 # WMO weather codes that indicate "bad weather" (precipitation/thunder)
@@ -111,7 +150,7 @@ def get_upcoming_bad_weather(
     hourly forecast when 15-minute data isn't available.
 
     `now_dt` should be the live local time; pass it from the caller so the
-    countdown matches the on-screen clock rather than the (possibly stale) API
+    timing reflects the actual render time rather than the (possibly stale) API
     snapshot. Falls back to the cached `current.local_time` if not supplied.
 
     Returns None if no bad weather expected, otherwise a dict like:
@@ -286,6 +325,23 @@ def _parse_openmeto_response(data: Dict[str, Any], unit: str) -> Dict[str, Any]:
                 "weather_code": hourly["weather_code"][i],
             })
 
+    # 24-hour series from the current hour for the temperature / rain chart.
+    hourly_chart = []
+    if hourly.get("time") and hourly.get("temperature_2m") and local_time:
+        probs = hourly.get("precipitation_probability") or []
+        start = local_time.replace(minute=0, second=0, microsecond=0)
+        for i, t in enumerate(hourly["time"]):
+            h_dt = datetime.strptime(t, "%Y-%m-%dT%H:%M")
+            if h_dt < start:
+                continue
+            hourly_chart.append({
+                "time": h_dt.isoformat(),
+                "temperature": hourly["temperature_2m"][i],
+                "probability": probs[i] if i < len(probs) else None,
+            })
+            if len(hourly_chart) >= 25:  # 24 intervals
+                break
+
     # Build 15-minute forecast for near-term precipitation timing (next ~3h).
     minutely = data.get("minutely_15", {})
     minutely_forecast = []
@@ -309,11 +365,11 @@ def _parse_openmeto_response(data: Dict[str, Any], unit: str) -> Dict[str, Any]:
             if len(minutely_forecast) >= 12:  # ~3 hours at 15-min resolution
                 break
 
-    # Build forecast list (5 days, skip today if we already show it in current)
+    # Build forecast list (up to 7 days, skipping today which is shown as "now")
     forecast = []
     time_strs = daily["time"]  # UTC date strings like "2024-01-15"
 
-    for i in range(1, min(6, len(time_strs))):  # Start from index 1 to skip today
+    for i in range(1, min(8, len(time_strs))):  # Start from index 1 to skip today
         dt = datetime.strptime(time_strs[i], "%Y-%m-%d").date()
         forecast.append({
             "date": dt.isoformat(),
@@ -344,10 +400,16 @@ def _parse_openmeto_response(data: Dict[str, Any], unit: str) -> Dict[str, Any]:
             "temperature": current["temperature_2m"],
             "feels_like": current["apparent_temperature"],
             "wind_speed": current["wind_speed_10m"],
+            "wind_direction": current.get("wind_direction_10m"),
             "weather_code": current["weather_code"],
+            "humidity": current.get("relative_humidity_2m"),
+            "pressure": current.get("pressure_msl"),
+            "visibility": current.get("visibility"),   # metres
+            "uv_index": current.get("uv_index"),
             "local_time": local_time.isoformat() if local_time else None,
         },
         "hourly_forecast": hourly_forecast,
+        "hourly_chart": hourly_chart,
         "minutely_forecast": minutely_forecast,
         "today_high": daily["temperature_2m_max"][0],
         "today_low": daily["temperature_2m_min"][0],

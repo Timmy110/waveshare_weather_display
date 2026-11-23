@@ -71,7 +71,7 @@ def weather_data_hash(weather: Dict[str, Any]) -> str:
     """
     Compute a stable hash of the weather data fields used for rendering.
 
-    Includes current conditions + forecast. Excludes local_time (clock is
+    Includes current conditions + forecast. Excludes local_time (the date is
     rendered from live system time, not the API snapshot) and unit which
     doesn't affect visual content beyond labels.
     """
@@ -84,7 +84,18 @@ def weather_data_hash(weather: Dict[str, Any]) -> str:
             "weather_code": cur.get("weather_code"),
             "feels_like": round(cur.get("feels_like") or 0),
             "wind_speed": round(cur.get("wind_speed") or 0),
+            "humidity": round(cur.get("humidity") or 0),
+            "pressure": round(cur.get("pressure") or 0),
+            "uv_index": round(cur.get("uv_index") or 0, 1),
+            "visibility_km": round((cur.get("visibility") or 0) / 1000),
         },
+        "air_quality": weather.get("air_quality"),
+        # The 24 h chart (temperature line + rain-probability bars)
+        "hourly_chart": [
+            {"time": p.get("time"), "temperature": round(p.get("temperature") or 0),
+             "probability": p.get("probability")}
+            for p in weather.get("hourly_chart", [])
+        ],
         "hourly_forecast": [
             {"hour": h.get("hour"), "temperature": round(h.get("temperature") or 0), "weather_code": h.get("weather_code")}
             for h in weather.get("hourly_forecast", [])

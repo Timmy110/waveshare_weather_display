@@ -216,3 +216,33 @@ def test_active_uses_hourly_fallback_for_long_events():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+def test_parse_builds_24h_chart_from_current_hour():
+    data = _sample_response()
+    data["hourly"]["precipitation_probability"] = list(range(24))
+    w = _parse_openmeto_response(data, "celsius")
+    chart = w["hourly_chart"]
+    # current.time is 14:30 -> series starts at 14:00 and runs to the end of data
+    assert chart[0]["time"] == "2024-01-15T14:00:00"
+    assert chart[0]["probability"] == 14
+    assert len(chart) == 10
+
+
+def test_parse_keeps_up_to_seven_forecast_days():
+    data = _sample_response()
+    daily = data["daily"]
+    for key in daily:
+        daily[key] = (daily[key] + daily[key])[:8]
+    daily["time"] = [f"2024-01-{15 + i:02d}" for i in range(8)]
+    w = _parse_openmeto_response(data, "celsius")
+    assert len(w["forecast"]) == 7
+
+
+def test_aqi_labels():
+    from weather_dashboard.weather import aqi_label
+
+    assert aqi_label(None) == ""
+    assert aqi_label(15) == "Good"
+    assert aqi_label(48) == "Moderate"
+    assert aqi_label(130) == "Extreme"
