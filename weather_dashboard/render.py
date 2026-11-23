@@ -227,14 +227,103 @@ def _bad_weather_text(weather: Dict[str, Any], now_local: datetime) -> Optional[
 
 
 # ---------------------------------------------------------------------------
-# Text drawing — positioned by INK bounds rather than the font's line box.
-# PIL draws text with an internal top bearing, so `draw.text((x, y))` puts the
-# glyphs a few pixels below `y`, by a different amount per size. Aligning by
-# ink lets mixed sizes (e.g. "21" + "°C") share a clean top or baseline.
+# Text drawing
+#
+# Rasterised by COVERAGE, not by FreeType's black-and-white mode. In mono mode
+# hinting snaps straight stems ("1", "4", "h") to whole pixels while curves
+# and diagonals ("0", "2", "7") keep their thinner true weight, so digits look
+# unevenly heavy. Instead each string is drawn anti-aliased at TEXT_SS x size,
+# box-downsampled, and thresholded: every stroke gets the same true weight.
+#
+# Text is positioned by its INK bounds, not the font's line box, so mixed
+# sizes (e.g. "21" + "°C") share a clean top edge.
 # ---------------------------------------------------------------------------
+
+TEXT_SS = 4            # supersampling factor
+TEXT_COVERAGE = 102    # ink if >= 40% covered (50% drops thin parts like "°")
+
+def _tracking(size: int) -> float:
+    """
+    Extra letter spacing (px at 1x). Mono hinting used to round small-size
+    advances up; unhinted coverage rendering uses the true, tighter advances,
+    which crowd at small sizes on a 1-bit panel.
+    """
+    if size <= 15:
+        return 0.6
+    if size <= 22:
+        return 0.3
+    return 0.0
+
+
+def _layout(big, text, track_big):
+    """Per-character pen positions (big px) with extra tracking."""
+    pos, x = [], 0.0
+    for ch in text:
+        pos.append(x)
+        x += big.getlength(ch) + track_big
+    return pos
+
+
+_big_fonts: Dict[Tuple[str, int], Any] = {}
+_rasters: Dict[Tuple[Any, ...], Tuple[Image.Image, int, int, int, int]] = {}
+
+
+def _raster(font, text) -> Optional[Tuple[Image.Image, int, int, int, int]]:
+    """
+    ('L' ink mask cropped to the ink, left, top, right, bottom) of `text`,
+    relative to the draw origin at 1x. None for fonts without a file (bitmap
+    fallback), which are drawn directly.
+    """
+    path = getattr(font, "path", None)
+    if not path or not text:
+        return None
+    fake_bold = getattr(font, "fake_bold", False)
+    key = (path, font.size, fake_bold, text)
+    hit = _rasters.get(key)
+    if hit is not None:
+        return hit
+    k = TEXT_SS
+    big = _big_fonts.get((path, font.size))
+    if big is None:
+        big = _big_fonts[(path, font.size)] = ImageFont.truetype(path, font.size * k)
+    stroke = k if fake_bold else 0
+    track = _tracking(font.size) * k
+    pos = _layout(big, text, track) if track else [0.0]
+    chars = list(text) if track else [text]
+    boxes = []
+    for ch, px in zip(chars, pos):
+        b = big.getbbox(ch, stroke_width=stroke) if stroke else big.getbbox(ch)
+        if b[2] > b[0]:
+            boxes.append((b[0] + px, b[1], b[2] + px, b[3]))
+    if not boxes:
+        boxes = [(0, 0, 0, 0)]
+    bl, bt = int(min(b[0] for b in boxes)), min(b[1] for b in boxes)
+    br, bb = int(max(b[2] for b in boxes)) + 1, max(b[3] for b in boxes)
+    # 1x pixel window that covers the ink, so the downsample grid lines up
+    # with the panel's pixel grid.
+    x0, y0 = bl // k, bt // k
+    x1, y1 = -(-br // k), -(-bb // k)
+    w, h = max(1, x1 - x0), max(1, y1 - y0)
+    canvas = Image.new("L", (w * k, h * k), 0)
+    kwargs = {"stroke_width": stroke, "stroke_fill": 255} if stroke else {}
+    d = ImageDraw.Draw(canvas)
+    for ch, px in zip(chars, pos):
+        d.text((px - x0 * k, -y0 * k), ch, font=big, fill=255, **kwargs)
+    mask = canvas.resize((w, h), Image.BOX).point(lambda p: 255 if p >= TEXT_COVERAGE else 0)
+    ink = mask.getbbox()
+    if ink is None:
+        result = (mask, x0, y0, x0, y0)
+    else:
+        result = (mask.crop(ink), x0 + ink[0], y0 + ink[1], x0 + ink[2], y0 + ink[3])
+    _rasters[key] = result
+    return result
+
 
 def _ink_box(font, text) -> Tuple[int, int, int, int]:
     """(left, top, right, bottom) ink box of `text` relative to the draw origin."""
+    r = _raster(font, text)
+    if r is not None:
+        return r[1:]
     try:
         return font.getbbox(text)
     except AttributeError:  # very old Pillow
@@ -252,6 +341,16 @@ def _cap_height(font) -> int:
     return b - t
 
 
+def _blit(draw, font, text, ink_x, ink_y, fill) -> None:
+    """Draw `text` with its ink box's top-left at (ink_x, ink_y)."""
+    r = _raster(font, text)
+    if r is not None:
+        draw.bitmap((ink_x, ink_y), r[0], fill=fill)
+        return
+    l, t, _, _ = _ink_box(font, text)
+    draw.text((ink_x - l, ink_y - t), text, font=font, fill=fill)
+
+
 def _text(draw, text, font, x, y, fill, align="left") -> Tuple[int, int]:
     """
     Draw `text` with its ink top at `y`; `x` is the left edge, centre or right
@@ -260,23 +359,15 @@ def _text(draw, text, font, x, y, fill, align="left") -> Tuple[int, int]:
     l, t, r, b = _ink_box(font, text)
     w, h = r - l, b - t
     ox = x - w // 2 if align == "center" else x - w if align == "right" else x
-    kwargs = {"stroke_width": 1, "stroke_fill": fill} if getattr(font, "fake_bold", False) else {}
-    try:
-        draw.text((ox - l, y - t), text, font=font, fill=fill, **kwargs)
-    except TypeError:  # Pillow < 6.2 has no stroke support
-        draw.text((ox - l, y - t), text, font=font, fill=fill)
+    _blit(draw, font, text, ox, y, fill)
     return w, h
 
 
 def _text_baseline(draw, text, font, x, baseline, fill) -> int:
     """Draw `text` left-aligned on a shared baseline (for value + small unit). Returns advance."""
     asc, _ = font.getmetrics()
-    l, _, r, _ = _ink_box(font, text)
-    kwargs = {"stroke_width": 1, "stroke_fill": fill} if getattr(font, "fake_bold", False) else {}
-    try:
-        draw.text((x - l, baseline - asc), text, font=font, fill=fill, **kwargs)
-    except TypeError:
-        draw.text((x - l, baseline - asc), text, font=font, fill=fill)
+    l, t, r, _ = _ink_box(font, text)
+    _blit(draw, font, text, x, baseline - asc + t, fill)
     return r - l
 
 
@@ -380,10 +471,10 @@ def render_weather(
     temp_s = _num(cur["temperature"])
     unit_s = f"°{unit_letter}"
     tw, uw = _width(f_temp, temp_s), _width(f_unit, unit_s)
-    t_left = TEMP_CX - (tw + 4 + uw) // 2
+    t_left = TEMP_CX - (tw + 8 + uw) // 2
     temp_top = 122
     _, th = _text(draw_b, temp_s, f_temp, t_left, temp_top, COLOR_BLACK)
-    _text(draw_b, unit_s, f_unit, t_left + tw + 4, temp_top, COLOR_BLACK)
+    _text(draw_b, unit_s, f_unit, t_left + tw + 8, temp_top, COLOR_BLACK)
 
     condition, _ = _condition_label_and_icon(cur["weather_code"])
     y = temp_top + th + 16
@@ -421,10 +512,10 @@ def render_weather(
         _text(draw_b, label, f_label, text_cx, row_cy - 16, COLOR_BLACK, align="center")
         # value + small unit share a baseline, centred as a pair
         vw = _width(f_value, value)
-        uw = _width(f_vunit, unit) + 4 if unit else 0
+        uw = _width(f_vunit, unit) + 6 if unit else 0
         x = text_cx - (vw + uw) // 2
         baseline = row_cy + 20
-        x += _text_baseline(draw_b, value, f_value, x, baseline, COLOR_BLACK) + 4
+        x += _text_baseline(draw_b, value, f_value, x, baseline, COLOR_BLACK) + 6
         if unit:
             _text_baseline(draw_b, unit, f_vunit, x, baseline, COLOR_BLACK)
 
