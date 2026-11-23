@@ -13,10 +13,14 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+.pytest_cache/
 
 # Logs
 logs/
 *.log
+
+# Runtime cache (weather JSON, render meta, debug images)
+cache/
 
 # Virtual environment
 .venv/

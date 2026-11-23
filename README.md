@@ -4,12 +4,15 @@ A Python script that fetches current weather from [Open-Meteo](https://open-mete
 
 ## Features
 
-- Current temperature, feels-like, wind speed, weather condition with icon
-- Today's high/low temperatures
-- 5-day forecast strip with per-day highs/lows and weather icons
+- Pure weather dashboard: location and date in a centred header — no clock
+- Current conditions: large icon, temperature, feels-like, condition, plus a red notice when rain/snow is falling (until when) or due within 2 hours
+- Metrics grid: sunrise, sunset, wind (speed + direction), humidity, pressure, UV index, visibility and air quality (European AQI)
+- 24-hour chart: temperature line over rain-probability bars
+- 7-day forecast cards with icons and high / low
+- Filled vector icons drawn for the black/white/red panel: red for sun and warmth, dithered black for greys; moon variants at night
 - Smart refresh: only updates the display when data actually changes (saves e-ink panel wear)
 - Forced full-refresh every N runs (configurable, default: 24) to prevent image ghosting
-- Stale-data fallback: if the API is unreachable, redraws last known good data with a red warning badge
+- Stale-data fallback: if the API is unreachable, redraws last known good data with a red "Offline" note next to the update time
 - Debug PNG images saved to cache directory for inspection without physical hardware
 
 ## Hardware
@@ -19,8 +22,6 @@ A Python script that fetches current weather from [Open-Meteo](https://open-mete
 | SBC | Raspberry Pi Zero 2 W (or any Pi with SPI) |
 | Display | Waveshare 7.5inch E-Paper HAT (B) — **3-color variant** (`epd7in5b_V2`) |
 | Resolution | 800 × 480 (landscape) |
-
-> **Note:** This script does **not** use `init_part()` / `display_Partial()`. Those methods exist only on the single-color `epd7in5_V2` variant. "Partial refresh" here means *skipping the draw entirely* when nothing changed.
 
 ## Installation
 
@@ -34,24 +35,17 @@ cd waveshare_weather_display
 ### 2. Install Python dependencies
 
 ```bash
-pip3 install Pillow requests
+pip3 install -r requirements.txt
 ```
 
 The bundled `lib/waveshare_epd/` directory already contains the panel driver — no pip package needed for it.
 
-### 3. Install a font (if not already present)
+### 3. Fonts
 
-The renderer prefers `pic/Font.ttc` (place any `.ttc` or `.ttf` there), then falls back to system fonts like DejaVu Sans or Arial. On Raspberry Pi OS:
-
-```bash
-sudo apt install fonts-dejavu-core
-```
-
-Or copy your preferred font into the project:
-
-```bash
-cp /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf pic/Font.ttc
-```
+The [Jost](https://github.com/indestructible-type/Jost) font family (SIL Open Font
+License, see `resources/fonts/OFL.txt`) is bundled in `resources/fonts/`, so nothing
+needs installing. To use a different face, set `font_path` in the config; heavier
+weights are then simulated.
 
 ### 4. Configure location & settings
 
@@ -63,7 +57,7 @@ Edit `config.json`:
     "longitude": 2.3522,
     "timezone": "Europe/Paris",
     "temperature_unit": "celsius",
-    "cache_dir": "~/.weather_dashboard",
+    "cache_dir": "cache",
     "full_refresh_interval": 24,
     "api_timeout_seconds": 10,
     "font_path": null
@@ -75,10 +69,10 @@ Edit `config.json`:
 | `latitude` / `longitude` | Your location (required) |
 | `timezone` | IANA timezone for correct day boundaries |
 | `temperature_unit` | `"celsius"` or `"fahrenheit"` |
-| `cache_dir` | Where weather cache + debug images are stored |
+| `cache_dir` | Where weather cache + debug images are stored. Relative paths (default `"cache"`) are resolved against the project directory, so the cache travels with the repo; absolute paths and `~` are also accepted. |
 | `full_refresh_interval` | Force a full panel refresh every N runs (default 24) |
 | `api_timeout_seconds` | HTTP timeout for Open-Meteo requests |
-| `font_path` | Optional absolute path to a `.ttf`/`.ttc` file. `null` = auto-detect. |
+| `font_path` | Optional absolute path to a `.ttf`/`.ttc` file. `null` = bundled Jost. |
 
 ## Usage
 
@@ -98,14 +92,34 @@ The script will:
 python3 weather_dashboard.py --config /path/to/my_config.json
 ```
 
+### Testing without the display
+
+The script runs on any machine (no Raspberry Pi or panel required) — handy for
+working on the layout. If the e-Paper driver/hardware isn't present it
+**automatically** falls back to a headless, image-only mode. You can also force it:
+
+```bash
+python3 weather_dashboard.py --no-display              # render only, never touch hardware
+python3 weather_dashboard.py -o /tmp/preview.png       # also copy the preview to a chosen path
+```
+
+In every run (hardware or headless) the renderer writes inspectable images to the
+**cache directory**: `last_black.png`, `last_red.png`, and `preview.png` — a composite
+RGB image that mimics how the physical panel looks (white / black / red). So a plain
+`--no-display` run already leaves the preview at `cache/preview.png`.
+
+`-o/--output PATH` is only needed to additionally save a copy somewhere else. The path
+is relative to your current directory, so prefer an explicit location (e.g. `/tmp/...`)
+rather than a bare filename that lands in the project root.
+
 ## Scheduling
 
 ### Option A: cron
 
-Edit crontab (`crontab -e`) and add a line like this to run every 30 minutes:
+Edit crontab (`crontab -e`) and run the dashboard every 15–30 minutes:
 
 ```cron
-*/30 * * * * cd /home/pi/waveshare_weather_display && python3 weather_dashboard.py >> /var/log/weather_dashboard.log 2>&1
+*/15 * * * * cd /home/pi/waveshare_weather_display && python3 weather_dashboard.py >> /var/log/weather_dashboard.log 2>&1
 ```
 
 ### Option B: systemd timer (recommended)
@@ -157,14 +171,35 @@ journalctl -u weather-dashboard.service
 waveshare_weather_display/
 ├── weather_dashboard.py          # Main entry point (run this)
 ├── config.json                   # User settings (lat/lon, timezone, etc.)
+├── requirements.txt              # Python dependencies
 ├── weather_dashboard/
 │   ├── __init__.py
 │   ├── weather.py                # Open-Meteo fetch + parsing
 │   ├── cache.py                  # Local JSON cache management
-│   └── render.py                 # PIL image rendering (black + red buffers)
+│   ├── render.py                 # Layout: PIL image rendering (black + red buffers)
+│   └── icons.py                  # Vector weather + metric icons, dithering
+├── cache/                        # Runtime cache + debug images (git-ignored, auto-created)
 ├── lib/waveshare_epd/            # Bundled Waveshare panel driver
-├── pic/                          # Fonts, test images (optional)
+├── resources/
+│   ├── fonts/                    # Bundled Jost font family (OFL)
+│   └── pic/                      # Fallback font (Font.ttc)
+├── tests/                        # Unit tests (run with pytest)
 └── README.md
+```
+
+## Development
+
+Install the dev/test dependencies (these are **not** needed on the Pi):
+
+```bash
+pip3 install -r requirements-dev.txt
+```
+
+The fetch/parse/cache logic is covered by unit tests that need neither network
+nor hardware:
+
+```bash
+python3 -m pytest tests/ -v
 ```
 
 ## Troubleshooting
@@ -172,10 +207,10 @@ waveshare_weather_display/
 | Problem | Fix |
 |---------|-----|
 | `ModuleNotFoundError: waveshare_epd` | Ensure `lib/` is in the same directory as `weather_dashboard.py` |
-| Font rendering looks wrong | Place a `.ttf` or `.ttc` file at `pic/Font.ttc` or set `font_path` in config |
+| Font rendering looks wrong | Check `resources/fonts/` is present, or set `font_path` in config |
 | Display stays blank after first run | Check that SPI is enabled: `sudo raspi-config` → Interface Options → SPI |
 | Script hangs during `epd.init()` | Verify GPIO pin access — may need to run as `pi` user with proper permissions, or use `sudo` for testing |
-| Debug images not appearing | Check `~/.weather_dashboard/` directory (or your configured `cache_dir`) |
+| Debug images not appearing | Check the `cache/` directory inside the project (or your configured `cache_dir`) |
 
 ## License
 

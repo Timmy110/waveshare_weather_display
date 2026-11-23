@@ -24,8 +24,12 @@ def read_last_weather(cache_dir: str) -> Optional[Dict[str, Any]]:
     try:
         with open(path, "r") as f:
             return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError) as exc:
-        logger.warning("No valid weather cache at %s: %s", path, exc)
+    except FileNotFoundError:
+        # Expected on the first run (callers that care log their own message).
+        logger.debug("No weather cache yet at %s", path)
+        return None
+    except json.JSONDecodeError as exc:
+        logger.warning("Corrupt weather cache at %s: %s", path, exc)
         return None
 
 
@@ -45,8 +49,12 @@ def read_render_meta(cache_dir: str) -> Optional[Dict[str, Any]]:
     try:
         with open(path, "r") as f:
             return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError) as exc:
-        logger.warning("No valid render meta cache at %s: %s", path, exc)
+    except FileNotFoundError:
+        # Expected on the first run before any render has happened.
+        logger.debug("No render meta cache yet at %s", path)
+        return None
+    except json.JSONDecodeError as exc:
+        logger.warning("Corrupt render meta cache at %s: %s", path, exc)
         return None
 
 
@@ -63,27 +71,121 @@ def weather_data_hash(weather: Dict[str, Any]) -> str:
     """
     Compute a stable hash of the weather data fields used for rendering.
 
-    Includes current conditions + forecast (excludes unit which doesn't affect
-    visual content beyond labels).
+    Includes current conditions + forecast. Excludes local_time (the date is
+    rendered from live system time, not the API snapshot) and unit which
+    doesn't affect visual content beyond labels.
     """
-    # Build a deterministic snapshot of the displayable fields
+    # Round to match display precision (: .0f) so minor float changes
+    # don't trigger unnecessary full refreshes.
+    cur = weather.get("current", {})
     snapshot = {
         "current": {
-            "temperature": weather.get("current", {}).get("temperature"),
-            "weather_code": weather.get("current", {}).get("weather_code"),
-            "feels_like": weather.get("current", {}).get("feels_like"),
-            "wind_speed": weather.get("current", {}).get("wind_speed"),
-            "local_time": weather.get("current", {}).get("local_time"),
+            "temperature": round(cur.get("temperature") or 0),
+            "weather_code": cur.get("weather_code"),
+            "feels_like": round(cur.get("feels_like") or 0),
+            "wind_speed": round(cur.get("wind_speed") or 0),
+            "humidity": round(cur.get("humidity") or 0),
+            "pressure": round(cur.get("pressure") or 0),
+            "uv_index": round(cur.get("uv_index") or 0, 1),
+            "visibility_km": round((cur.get("visibility") or 0) / 1000),
         },
-        "hourly_forecast": weather.get("hourly_forecast", []),
-        "today_high": weather.get("today_high"),
-        "today_low": weather.get("today_low"),
+        "air_quality": weather.get("air_quality"),
+        # The 24 h chart (temperature line + rain-probability bars)
+        "hourly_chart": [
+            {"time": p.get("time"), "temperature": round(p.get("temperature") or 0),
+             "probability": p.get("probability")}
+            for p in weather.get("hourly_chart", [])
+        ],
+        "hourly_forecast": [
+            {"hour": h.get("hour"), "temperature": round(h.get("temperature") or 0), "weather_code": h.get("weather_code")}
+            for h in weather.get("hourly_forecast", [])
+        ],
+        "today_high": round(weather.get("today_high") or 0),
+        "today_low": round(weather.get("today_low") or 0),
         "sunrise": weather.get("sunrise"),
         "sunset": weather.get("sunset"),
-        "forecast": weather.get("forecast", []),
+        "forecast": [
+            {"weekday": d.get("weekday"), "high": round(d.get("high") or 0), "low": round(d.get("low") or 0), "weather_code": d.get("weather_code")}
+            for d in weather.get("forecast", [])
+        ],
     }
     raw = json.dumps(snapshot, sort_keys=True)
     return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def diff_weather(
+    prev: Optional[Dict[str, Any]],
+    current: Dict[str, Any],
+) -> list:
+    """
+    Return human-readable descriptions of what changed between two weather
+    payloads, comparing the same rounded fields used by weather_data_hash().
+
+    Returns an empty list if `prev` is None or nothing material changed.
+    """
+    if not prev:
+        return []
+
+    # Imported lazily to avoid a hard import cycle at module load.
+    from weather_dashboard.render import condition_label
+
+    def rnd(value):
+        return round(value or 0)
+
+    changes = []
+    pc = prev.get("current", {})
+    cc = current.get("current", {})
+
+    if rnd(pc.get("temperature")) != rnd(cc.get("temperature")):
+        changes.append(f"Temperature: {rnd(pc.get('temperature'))}° → {rnd(cc.get('temperature'))}°")
+    if pc.get("weather_code") != cc.get("weather_code"):
+        changes.append(
+            f"Condition: {condition_label(pc.get('weather_code'))} → {condition_label(cc.get('weather_code'))}"
+        )
+    if rnd(pc.get("feels_like")) != rnd(cc.get("feels_like")):
+        changes.append(f"Feels like: {rnd(pc.get('feels_like'))}° → {rnd(cc.get('feels_like'))}°")
+    if rnd(pc.get("wind_speed")) != rnd(cc.get("wind_speed")):
+        changes.append(f"Wind: {rnd(pc.get('wind_speed'))} → {rnd(cc.get('wind_speed'))} km/h")
+
+    if rnd(prev.get("today_high")) != rnd(current.get("today_high")):
+        changes.append(f"Today's high: {rnd(prev.get('today_high'))}° → {rnd(current.get('today_high'))}°")
+    if rnd(prev.get("today_low")) != rnd(current.get("today_low")):
+        changes.append(f"Today's low: {rnd(prev.get('today_low'))}° → {rnd(current.get('today_low'))}°")
+
+    if prev.get("sunrise") != current.get("sunrise"):
+        changes.append(f"Sunrise: {prev.get('sunrise')} → {current.get('sunrise')}")
+    if prev.get("sunset") != current.get("sunset"):
+        changes.append(f"Sunset: {prev.get('sunset')} → {current.get('sunset')}")
+
+    # Per-day forecast, matched by weekday label.
+    prev_days = {d.get("weekday"): d for d in prev.get("forecast", [])}
+    for d in current.get("forecast", []):
+        pd = prev_days.get(d.get("weekday"))
+        if pd is None:
+            continue
+        parts = []
+        if rnd(pd.get("high")) != rnd(d.get("high")):
+            parts.append(f"high {rnd(pd.get('high'))}°→{rnd(d.get('high'))}°")
+        if rnd(pd.get("low")) != rnd(d.get("low")):
+            parts.append(f"low {rnd(pd.get('low'))}°→{rnd(d.get('low'))}°")
+        if pd.get("weather_code") != d.get("weather_code"):
+            parts.append(f"{condition_label(pd.get('weather_code'))}→{condition_label(d.get('weather_code'))}")
+        if parts:
+            changes.append(f"{d.get('weekday')} forecast: " + ", ".join(parts))
+
+    # Hourly strip: report how many of the shown hours differ (the window also
+    # slides over time, so this naturally picks up the advancing forecast).
+    prev_hours = {h.get("hour"): h for h in prev.get("hourly_forecast", [])}
+    hourly_changed = 0
+    for h in current.get("hourly_forecast", []):
+        ph = prev_hours.get(h.get("hour"))
+        if ph is None or rnd(ph.get("temperature")) != rnd(h.get("temperature")) \
+                or ph.get("weather_code") != h.get("weather_code"):
+            hourly_changed += 1
+    if hourly_changed:
+        changes.append(f"Hourly forecast: {hourly_changed} hour(s) updated")
+
+    return changes
 
 
 def should_full_refresh(

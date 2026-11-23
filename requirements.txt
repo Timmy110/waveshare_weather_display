@@ -1,0 +1,4 @@
+# Runtime dependencies for the weather dashboard (Raspberry Pi).
+# The Waveshare panel driver is vendored under lib/waveshare_epd/ (no pip package).
+Pillow>=9.0
+requests>=2.25
