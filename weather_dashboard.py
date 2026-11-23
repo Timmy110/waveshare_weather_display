@@ -35,10 +35,8 @@ from weather_dashboard.cache import (  # noqa: E402
     write_last_weather,
 )
 from weather_dashboard.render import (  # noqa: E402
-    clock_partial_buffer,
     compose_rgb,
     render_blank,
-    render_clock_region,
     render_weather,
 )
 from weather_dashboard.weather import fetch_weather  # noqa: E402
@@ -61,13 +59,6 @@ _DEFAULTS = {
     "full_refresh_interval": 24,
     "api_timeout_seconds": 10,
     "font_path": None,
-    # How the per-minute --time-only run repaints the clock:
-    #   "partial" — fast, flash-free partial refresh of just the clock digits
-    #               (init_part + display_Partial). Best UX, but partial refresh
-    #               on this 3-color panel is experimental (see render_clock_region).
-    #   "fast"    — repaint the whole screen from cached weather with a fast
-    #               refresh (init_Fast). No ghosting, but a brief flash each minute.
-    "time_update_mode": "partial",
 }
 
 
@@ -122,8 +113,8 @@ def _send_to_panel(epd_module, black_img, red_img, full_refresh: bool):
     Push the rendered buffers to the physical e-Paper panel.
 
     Returns the initialized EPD object so the caller can put it to sleep.
-    A full refresh (~15-20s) clears ghosting; a fast refresh (~5-8s) is used
-    when only the clock changed.
+    A full refresh (~15-20s) clears ghosting and is used when the weather
+    changed; a fast refresh (~5-8s) is used otherwise.
     """
     epd = epd_module.EPD()
     label = "full refresh" if full_refresh else "fast refresh"
@@ -137,54 +128,11 @@ def _send_to_panel(epd_module, black_img, red_img, full_refresh: bool):
     return epd
 
 
-def _send_partial_clock(epd_module, region_img, region):
-    """
-    Push just the clock digits to the panel via a partial refresh.
-
-    Uses init_part() + display_Partial() so only the clock window is redrawn —
-    no whole-screen flash. Assumes a prior full render already put the rest of
-    the dashboard on the panel (the 15-minute full-refresh run does that).
-    Returns the initialized EPD object so the caller can put it to sleep.
-    """
-    epd = epd_module.EPD()
-    logger.info("Initializing e-Paper (partial clock refresh) ...")
-    init_result = epd.init_part()
-    if init_result != 0:
-        raise RuntimeError(f"e-Paper init_part failed with code {init_result}")
-    x0, y0, x1, y1 = region
-    logger.info("Partial-refreshing clock region %s ...", region)
-    # display_Partial_clear seeds the old plane with the inverse of the new
-    # digits so the whole (small) window repaints and the previous time is
-    # cleared — a plain display_Partial() leaves the old digits underneath
-    # because each per-minute run is an isolated init_part/sleep cycle with no
-    # valid old frame on the panel.
-    epd.display_Partial_clear(clock_partial_buffer(region_img), x0, y0, x1, y1)
-    logger.info("Partial clock update complete")
-    return epd
-
-
-def _drive_and_sleep(send_fn):
-    """
-    Run a panel-send callable and always put the panel to sleep afterwards,
-    even if the send raises. Call inside a _panel_lock so init/display/sleep
-    all happen under the same lock (no SPI overlap with a concurrent run).
-    """
-    epd = None
-    try:
-        epd = send_fn()
-    finally:
-        if epd is not None:
-            try:
-                logger.info("Putting e-Paper to sleep ...")
-                epd.sleep()
-            except Exception as sleep_exc:
-                logger.error("Failed during epd.sleep(): %s", sleep_exc)
-
-
 class _panel_lock:
     """
-    Serialize physical-panel access so the every-minute time job and the
-    every-15-minute weather job never drive the SPI bus at the same time.
+    Serialize physical-panel access so two overlapping runs (e.g. a slow run
+    still going when the next scheduled one starts) never drive the SPI bus at
+    the same time.
 
     Uses an exclusive fcntl lock on POSIX (the Raspberry Pi target). On other
     platforms (e.g. Windows dev boxes, which always run headless) it is a no-op.
@@ -228,59 +176,6 @@ def _emit_headless(black_img, red_img, cache_dir: str, output_path):
 
 
 # ---------------------------------------------------------------------------
-# Time-only (per-minute clock) run
-# ---------------------------------------------------------------------------
-
-def _run_time_only(cfg, cache_dir, font_path, timezone_str, city_name,
-                   headless, epd_module, output_path) -> int:
-    """
-    Update only the clock — no network fetch, no cache writes.
-
-    Intended to run every minute alongside a separate full run (every ~15 min)
-    that handles weather. Two modes, selected by cfg["time_update_mode"]:
-      - "partial": partial-refresh just the clock digits (fast, flash-free).
-      - "fast":    re-render the whole screen from cached weather with a fast
-                   refresh (no ghosting, brief flash). Falls back to this when
-                   partial isn't wanted.
-    """
-    mode = str(cfg.get("time_update_mode", "partial")).lower()
-
-    # "fast" mode needs the last weather snapshot to redraw the full screen.
-    if mode == "fast":
-        weather = read_last_weather(cache_dir)
-        if weather is None:
-            logger.warning(
-                "time-only (fast mode): no cached weather yet — skipping. "
-                "The next full run will populate the cache."
-            )
-            return 0
-        black_img, red_img = render_weather(
-            weather, font_path=font_path, timezone_str=timezone_str, city_name=city_name,
-        )
-        _write_debug_images(black_img, red_img, cache_dir)
-        if headless:
-            _emit_headless(black_img, red_img, cache_dir, output_path)
-            return 0
-        with _panel_lock(cache_dir):
-            _drive_and_sleep(lambda: _send_to_panel(
-                epd_module, black_img, red_img, full_refresh=False))
-        return 0
-
-    # Default: "partial" — draw and blit just the clock region.
-    region_img, region = render_clock_region(timezone_str=timezone_str, font_path=font_path)
-    if headless:
-        preview_path = output_path or os.path.join(
-            os.path.expanduser(cache_dir), "preview_clock.png"
-        )
-        region_img.convert("L").save(preview_path)
-        logger.info("Headless — clock region preview written to %s", preview_path)
-        return 0
-    with _panel_lock(cache_dir):
-        _drive_and_sleep(lambda: _send_partial_clock(epd_module, region_img, region))
-    return 0
-
-
-# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -306,13 +201,6 @@ def main() -> int:
         default=None,
         help="Save a composite PNG preview of the screen to PATH. Implies --no-display.",
     )
-    parser.add_argument(
-        "--time-only",
-        action="store_true",
-        help="Only update the clock (no network fetch). Uses a partial refresh "
-             "of just the clock region by default — intended to run every minute "
-             "while a separate full run handles weather. See time_update_mode.",
-    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -329,9 +217,8 @@ def main() -> int:
     os.makedirs(cache_dir, exist_ok=True)
     logger.info("Using cache directory: %s", cache_dir)
 
-    font_path = cfg.get("font_path") or os.path.join(
-        os.path.dirname(__file__), "resources", "pic", "Font.ttc"
-    )
+    # None -> the renderer uses the bundled Jost family (resources/fonts/).
+    font_path = cfg.get("font_path")
     timezone_str = cfg["timezone"]
     city_name = cfg.get("city_name")
 
@@ -353,18 +240,6 @@ def main() -> int:
             headless = True
     if headless:
         logger.info("Running headless (no display) — rendering image only, hardware untouched.")
-
-    # --time-only: update just the clock and exit (no fetch, no cache writes).
-    if args.time_only:
-        logger.info("Time-only run (mode=%s)", cfg.get("time_update_mode", "partial"))
-        try:
-            return _run_time_only(
-                cfg, cache_dir, font_path, timezone_str, city_name,
-                headless, epd_module, args.output,
-            )
-        except Exception as exc:
-            logger.exception("Unhandled exception during time-only run: %s", exc)
-            return 1
 
     epd = None
     init_called = False
@@ -420,7 +295,7 @@ def main() -> int:
                 for change in changes:
                     logger.info("  • %s", change)
 
-        # Step 3 — Render images (live clock time, not the stale API snapshot)
+        # Step 3 — Render images (date from the live local clock, not the API snapshot)
         black_img, red_img = render_weather(
             weather, font_path=font_path, stale=stale_mode,
             timezone_str=timezone_str, city_name=city_name,

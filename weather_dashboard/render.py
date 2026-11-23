@@ -2,11 +2,10 @@
 """Render weather data to two PIL images (black + red buffers) for e-Ink display."""
 
 import logging
-import math
 import os
 import sys
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional, Tuple
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
 # zoneinfo is stdlib since Python 3.9
 if sys.version_info >= (3, 9):
@@ -20,6 +19,8 @@ else:
 
 from PIL import Image, ImageDraw, ImageFont
 
+from weather_dashboard.icons import dither_mask, draw_icon
+
 logger = logging.getLogger(__name__)
 
 # Resolution matches epd7in5b_V2 constants
@@ -29,15 +30,6 @@ WIDTH, HEIGHT = 800, 480
 COLOR_BG = 255       # white background
 COLOR_BLACK = 0      # black ink (active pixel in black buffer)
 COLOR_RED = 0        # red ink (active pixel in red buffer)
-
-# --- Clock layout (SHARED by the full render and the partial clock region) --
-# Keeping these in one place guarantees the per-minute partial refresh paints
-# the time at exactly the same spot the full render does — otherwise the clock
-# would visibly jump between the two refresh paths.
-CLOCK_MARGIN = 15
-CLOCK_LEFT_COL_WIDTH = 560
-CLOCK_CENTER_X = CLOCK_MARGIN + CLOCK_LEFT_COL_WIDTH // 2   # horizontal center (295)
-CLOCK_Y = CLOCK_MARGIN + 5                                  # top of the clock text (20)
 
 # --- Weather code mapping ---------------------------------------------------
 # WMO weather interpretation codes -> (text label, icon name)
@@ -73,271 +65,72 @@ WMO_CODES: Dict[int, Tuple[str, str]] = {
     99: ("Severe Thunderstorm", "thunder"),
 }
 
-# Icon file mapping (icon name -> PNG filename)
-ICON_FILES = {
-    "sun": "sun.png",
-    "cloud": "cloud.png",
-    "partly_cloudy": "partly_cloudy.png",
-    "rain": "rain.png",
-    "snow": "snow.png",
-    "fog": "fog.png",
-    "thunder": "thunder.png",
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_FONT_DIR = os.path.join(_HERE, "..", "resources", "fonts")
+_JOST = {
+    "regular": "Jost-Regular.ttf",
+    "medium": "Jost-Medium.ttf",
+    "semibold": "Jost-SemiBold.ttf",
 }
 
-# Pre-rendered icon cache: {icon_name: {size: Image}}
-_icon_cache: Dict[str, Dict[int, Image.Image]] = {}
 
+# ---------------------------------------------------------------------------
+# Fonts
+# ---------------------------------------------------------------------------
 
-def _default_font_path() -> Optional[str]:
-    """Try common locations for a TrueType Collection / font file."""
-    here = os.path.dirname(os.path.abspath(__file__))
+def _fallback_font_path() -> Optional[str]:
+    """Single-face fallback when the bundled Jost family isn't available."""
     candidates = [
-        os.path.join(here, "..", "resources", "pic", "Font.ttc"),
-        os.path.join(here, "..", "resources", "pic", "Font.ttf"),
+        os.path.join(_HERE, "..", "resources", "pic", "Font.ttc"),
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/TTF/DejaVuSans.ttf",
         "/usr/share/fonts/dejavu/DejaVuSans.ttf",
     ]
     for p in candidates:
         if os.path.isfile(p):
-            logger.info("Using font: %s", p)
             return p
-    logger.warning("No suitable font found; will fall back to default bitmap font")
     return None
 
 
-def _load_font(path: Optional[str], size: int) -> ImageFont.FreeTypeFont:
-    """Load a truetype font at the given size, or return the default."""
-    if path and os.path.isfile(path):
+def _font_loader(font_path: Optional[str]):
+    """
+    Return font(size, weight="regular") -> ImageFont.
+
+    Uses the bundled Jost family (regular / medium / semibold) unless the user
+    configured `font_path`, in which case that single face is used and heavier
+    weights are faked with a 1px stroke (see _text).
+    """
+    jost_ok = all(os.path.isfile(os.path.join(_FONT_DIR, f)) for f in _JOST.values())
+    single = font_path if (font_path and os.path.isfile(font_path)) else None
+    if not single and not jost_ok:
+        single = _fallback_font_path()
+        logger.warning("Bundled Jost fonts missing; falling back to %s", single or "bitmap font")
+    cache: Dict[Tuple[int, str], Any] = {}
+
+    def font(size: int, weight: str = "regular"):
+        key = (size, weight)
+        if key in cache:
+            return cache[key]
         try:
-            return ImageFont.truetype(path, size)
+            if single:
+                f = ImageFont.truetype(single, size)
+                f.fake_bold = weight != "regular"
+            elif jost_ok:
+                f = ImageFont.truetype(os.path.join(_FONT_DIR, _JOST[weight]), size)
+            else:
+                f = ImageFont.load_default()
         except Exception as exc:
-            logger.warning("Failed to load font %s at size %d: %s", path, size, exc)
-    # Fallback
-    return ImageFont.load_default()
+            logger.warning("Font load failed (%s, %d): %s", weight, size, exc)
+            f = ImageFont.load_default()
+        cache[key] = f
+        return f
+
+    return font
 
 
-def _get_font_height(font, text="Hg"):
-    """
-    Get the height of a font in pixels.
-    Works with both old and new Pillow versions.
-    """
-    try:
-        size = font.getsize(text)
-        return size[1]
-    except AttributeError:
-        # Newer Pillow uses getbbox
-        bbox = font.getbbox(text)
-        if bbox:
-            return (bbox[3] - bbox[1]) + 1
-        return 20
-
-
-def _get_text_width(font, text):
-    """Get the width of text in pixels."""
-    try:
-        size = font.getsize(text)
-        return size[0]
-    except AttributeError:
-        bbox = font.getbbox(text)
-        if bbox:
-            return (bbox[2] - bbox[0]) + 1
-        return len(text) * 6
-
-
-def _draw_centered_text(draw, text, font, center_x, y, fill):
-    """Draw `text` horizontally centered on `center_x` at vertical position `y`."""
-    w = _get_text_width(font, text)
-    draw.text((center_x - w // 2, y), text, font=font, fill=fill)
-
-
-def _draw_thick_line(draw, xy, fill, thickness=1):
-    """
-    Draw a line with specified thickness.
-    For older Pillow that doesn't support width= in draw.line(),
-    we draw multiple adjacent lines.
-    """
-    if thickness <= 1:
-        draw.line(xy, fill=fill)
-        return
-    # Get the direction and draw parallel lines
-    if len(xy) >= 2:
-        x0, y0 = xy[0]
-        x1, y1 = xy[-1]
-        dx = x1 - x0
-        dy = y1 - y0
-        length = math.sqrt(dx * dx + dy * dy)
-        if length > 0:
-            nx = -dy / length
-            ny = dx / length
-            for t in range(-thickness // 2, (thickness // 2) + 1):
-                new_x0 = x0 + int(nx * t)
-                new_y0 = y0 + int(ny * t)
-                new_x1 = x1 + int(nx * t)
-                new_y1 = y1 + int(ny * t)
-                draw.line([(new_x0, new_y0), (new_x1, new_y1)], fill=fill)
-
-
-def _load_icon_mask(icon_name: str, size: int) -> Optional[Image.Image]:
-    """
-    Load a pre-rendered PNG icon and convert it to a paste mask.
-    
-    The returned image is in mode '1' where pixels are 255 at the shape of the icon
-    and 0 everywhere else (suitable as the mask parameter to Image.paste()).
-    
-    Icons are cached per name+size. Returns None on failure.
-    """
-    # Check cache first
-    if icon_name in _icon_cache and size in _icon_cache[icon_name]:
-        return _icon_cache[icon_name][size]
-
-    # Resolve icon file path
-    filename = ICON_FILES.get(icon_name)
-    if not filename:
-        logger.warning("Unknown icon name: %s", icon_name)
-        return None
-
-    here = os.path.dirname(os.path.abspath(__file__))
-    icon_dir = os.path.join(here, "..", "resources", "icons")
-    icon_path = os.path.join(icon_dir, filename)
-
-    if not os.path.isfile(icon_path):
-        logger.warning("Icon file not found: %s", icon_path)
-        return None
-
-    try:
-        # Load PNG directly
-        img = Image.open(icon_path)
-        # Scale to requested size with LANCZOS (highest quality downsampling)
-        img = img.resize((size, size), Image.LANCZOS)
-
-        # Extract alpha channel to determine opaque pixels (icon shape)
-        if img.mode in ("RGBA", "LA"):
-            # Directly extract the alpha channel (index 3 for RGBA, index 1 for LA)
-            alpha = img.split()[-1]
-        elif img.mode == "P" and "transparency" in img.info:
-            # Palette mode with transparency — convert to RGBA first, then get alpha
-            alpha = img.convert("RGBA").split()[3]
-        else:
-            # No transparency info — use luminance threshold (dark-on-light icons)
-            gray = img.convert("L")
-            mask = gray.point(lambda p: 255 if p < 128 else 0).convert("1")
-            _icon_cache.setdefault(icon_name, {})[size] = mask
-            return mask
-        
-        # Threshold alpha: opaque pixels (>128) become the icon shape
-        mask = alpha.point(lambda p: 255 if p > 128 else 0).convert("1")
-
-        # Cache the result
-        _icon_cache.setdefault(icon_name, {})[size] = mask
-        return mask
-
-    except Exception as exc:
-        logger.error("Failed to load icon %s: %s", icon_name, exc)
-        return None
-
-
-def _draw_fallback_glyph(draw: ImageDraw.ImageDraw, glyph: str, cx: int, cy: int, r: int, fill: int) -> None:
-    """
-    Fallback geometric weather glyph when SVG icons are unavailable.
-    Centered at (cx, cy) with radius r.
-    """
-    if glyph == "sun":
-        draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=fill)
-        for angle in range(0, 360, 45):
-            x1 = int(cx + (r * 0.6) * math.cos(math.radians(angle)))
-            y1 = int(cy + (r * 0.6) * math.sin(math.radians(angle)))
-            x2 = int(cx + (r * 1.3) * math.cos(math.radians(angle)))
-            y2 = int(cy + (r * 1.3) * math.sin(math.radians(angle)))
-            _draw_thick_line(draw, [(x1, y1), (x2, y2)], fill=fill, thickness=2)
-
-    elif glyph == "cloud":
-        draw.ellipse([cx - r, cy - int(r * 0.4), cx + r, cy + int(r * 0.6)], fill=fill)
-        draw.ellipse([cx - int(r * 1.3), cy, cx - int(r * 0.2), cy + int(r * 0.9)], fill=fill)
-        draw.ellipse([cx + int(r * 0.2), cy - int(r * 0.5), cx + int(r * 1.4), cy + int(r * 0.3)], fill=fill)
-
-    elif glyph == "partly_cloudy":
-        draw.ellipse([cx - r, cy - r, cx + r, cy + int(r * 0.2)], fill=fill)
-        for angle in range(-60, 30, 45):
-            x1 = int(cx + (r * 0.5) * math.cos(math.radians(angle)))
-            y1 = int(cy + (r * 0.5) * math.sin(math.radians(angle)) - r * 0.2)
-            x2 = int(cx + (r * 1.0) * math.cos(math.radians(angle)))
-            y2 = int(cy + (r * 1.0) * math.sin(math.radians(angle)) - r * 0.2)
-            _draw_thick_line(draw, [(x1, y1), (x2, y2)], fill=fill, thickness=2)
-
-    elif glyph == "rain":
-        draw.ellipse([cx - r, cy - int(r * 1.0), cx + r, cy], fill=fill)
-        for dx in [-int(r * 0.6), 0, int(r * 0.6)]:
-            _draw_thick_line(
-                draw,
-                [(cx + dx, cy + int(r * 0.3)), (cx + dx - int(r * 0.2), cy + r)],
-                fill=fill, thickness=2,
-            )
-
-    elif glyph == "snow":
-        draw.ellipse([cx - r, cy - int(r * 1.0), cx + r, cy], fill=fill)
-        for dx in [-int(r * 0.6), 0, int(r * 0.6)]:
-            s = int(r * 0.15)
-            fy = cy + int(r * 0.5)
-            draw.ellipse([cx + dx - s, fy - s, cx + dx + s, fy + s], fill=fill)
-
-    elif glyph == "fog":
-        for dy in [-int(r * 0.6), 0, int(r * 0.6)]:
-            _draw_thick_line(
-                draw,
-                [(cx - r, cy + dy), (cx + r, cy + dy)],
-                fill=fill, thickness=3,
-            )
-
-    elif glyph == "thunder":
-        draw.ellipse([cx - r, cy - int(r * 1.0), cx + r, cy], fill=fill)
-        points = [
-            (cx + int(r * 0.2), cy + int(r * 0.2)),
-            (cx - int(r * 0.2), cy + int(r * 0.6)),
-            (cx + int(r * 0.1), cy + int(r * 0.6)),
-            (cx - int(r * 0.1), cy + r),
-        ]
-        draw.polygon(points, fill=fill)
-
-
-def _paste_icon(base_img: Image.Image, icon_name: str, cx: int, cy: int, size: int) -> bool:
-    """
-    Paste an icon centered at (cx, cy) on the base black buffer.
-    Uses SVG mask pasting if cairosvg is available, else falls back to geometric glyph.
-    Returns True if icon was successfully pasted, False otherwise.
-    """
-    mask = _load_icon_mask(icon_name, size)
-    if mask is not None:
-        x = cx - size // 2
-        y = cy - size // 2
-        # Paste COLOR_BLACK (0) where mask is active (255)
-        base_img.paste(COLOR_BLACK, (x, y), mask)
-        return True
-
-    # Fallback to geometric glyph
-    draw = ImageDraw.Draw(base_img)
-    _draw_fallback_glyph(draw, icon_name, cx, cy, size // 2, COLOR_BLACK)
-    return True
-
-
-def _paste_icon_red(red_img: Image.Image, icon_name: str, cx: int, cy: int, size: int) -> bool:
-    """
-    Paste a RED icon centered at (cx, cy) on the red image buffer.
-    Falls back to geometric glyph if cairosvg is unavailable.
-    """
-    mask = _load_icon_mask(icon_name, size)
-    if mask is not None:
-        x = cx - size // 2
-        y = cy - size // 2
-        # Paste COLOR_RED (0 in red buffer) where mask is active (255)
-        red_img.paste(COLOR_RED, (x, y), mask)
-        return True
-
-    # Fallback to geometric glyph on red buffer
-    draw = ImageDraw.Draw(red_img)
-    _draw_fallback_glyph(draw, icon_name, cx, cy, size // 2, COLOR_RED)
-    return True
-
+# ---------------------------------------------------------------------------
+# Small helpers
+# ---------------------------------------------------------------------------
 
 def _condition_label_and_icon(code: int) -> Tuple[str, str]:
     """Return a human-readable condition label and icon name for a WMO code."""
@@ -367,101 +160,157 @@ def _get_local_time(timezone_str: str = "Europe/Paris") -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _round_up_to_5min(dt: datetime) -> datetime:
-    """Round datetime up to the next multiple of 5 minutes."""
-    if dt.minute % 5 == 0 and dt.second == 0:
-        return dt.replace(second=0, microsecond=0)
-    new_minutes = (dt.minute // 5 + 1) * 5
-    if new_minutes >= 60:
-        return dt.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-    return dt.replace(minute=new_minutes % 60, second=0, microsecond=0)
+# Day icons that have a night variant (precipitation/fog/overcast look the same).
+_NIGHT_ICONS = {"sun": "moon", "partly_cloudy": "partly_cloudy_night"}
 
 
-def render_clock_region(
-    timezone_str: str = "Europe/Paris",
-    font_path: Optional[str] = None,
-) -> Tuple[Image.Image, Tuple[int, int, int, int]]:
+def _is_night(hhmm: Optional[str], sunrise: Optional[str], sunset: Optional[str]) -> bool:
+    """True if local "HH:MM" falls before sunrise or at/after sunset (zero-padded compare)."""
+    if not (hhmm and sunrise and sunset):
+        return False
+    return hhmm < sunrise or hhmm >= sunset
+
+
+def _icon_for(code: int, night: bool) -> str:
+    _, icon = _condition_label_and_icon(code)
+    return _NIGHT_ICONS.get(icon, icon) if night else icon
+
+
+def _num(value) -> str:
+    """Whole-number display. round() returns an int, so -0.3 shows "0", not "-0"."""
+    return str(round(value or 0))
+
+
+def _format_date(dt: datetime) -> str:
+    """'Monday, 23 November' — day name + day-first date, no leading zero."""
+    return f"{dt.strftime('%A')}, {dt.day} {dt.strftime('%B')}"
+
+
+_COMPASS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+
+
+def _compass(degrees: Optional[float]) -> str:
+    if degrees is None:
+        return ""
+    return _COMPASS[int((degrees % 360) / 45 + 0.5) % 8]
+
+
+def _visibility(metres: Optional[float]) -> Tuple[str, str]:
+    if metres is None:
+        return "-", ""
+    km = metres / 1000
+    if km >= 10:
+        return f"{km:.0f}", "km"
+    return f"{km:.1f}", "km"
+
+
+def _bad_weather_text(weather: Dict[str, Any], now_local: datetime) -> Optional[str]:
     """
-    Render just the HH:MM clock digits for a partial e-paper refresh.
-
-    Returns ``(region_img, region)`` where:
-      - ``region`` is the (x0, y0, x1, y1) panel-pixel box the caller passes to
-        ``epd.display_Partial()``. x0/x1 are byte-aligned (multiples of 8) so the
-        driver does not silently round them and desync from ``region_img``.
-      - ``region_img`` is a 1-bit PIL image sized exactly ``(x1-x0, y1-y0)`` with
-        the clock centered on the SAME panel coordinate the full render uses.
-
-    Only the digits are covered (not the date/sunrise lines below): a smaller
-    partial window means less area for the panel to ghost, and the date only
-    changes once a day — the 15-minute full refresh repaints it.
-
-    NOTE: partial refresh on this 3-color (B/W/R) panel is experimental. The
-    digits are pushed via ``EPD.display_Partial_clear()``, which seeds the old
-    RAM plane with the inverse of this buffer so the whole (tight) window
-    repaints as B/W and the previous time is cleared rather than left underneath.
-    Some faint ghosting may still remain until the next full refresh. Verify on
-    the physical panel; if the result is poor, set ``time_update_mode: "fast"``
-    in config to fall back to a whole-screen fast refresh instead. Pair with
-    clock_partial_buffer().
+    Short precipitation notice shown under the temperature, or None. If it's
+    already raining/snowing, say until when; otherwise name the next event and
+    when it starts. Absolute times (not "in N min") because the panel only
+    refreshes periodically.
     """
-    if not (font_path and os.path.isfile(font_path)):
-        font_path = _default_font_path()
-    if font_path and os.path.isfile(font_path):
-        font_clock = _load_font(font_path, 96)
-    else:
-        font_clock = _load_font(None, 36)
+    from weather_dashboard.weather import get_active_bad_weather, get_upcoming_bad_weather
 
-    now_dt = _get_local_time(timezone_str)
-    clock_display = now_dt.strftime("%H:%M")
-
-    # Size the box to the digits, NOT the whole left column — a tight window
-    # means far less area for the panel to drive (and ghost). Measure the widest
-    # possible HH:MM ("88:88") rather than the current value so the window stays
-    # a constant size every minute: a fixed window ghosts less than one that
-    # grows and shrinks tick to tick, and always encloses the shared center.
-    #
-    # Byte-align the horizontal bounds (x0 down, x1 up to the next multiple of 8)
-    # so the driver's own alignment in display_Partial() is a no-op. The panel
-    # packs 8 horizontal pixels per byte.
-    half_w = _get_text_width(font_clock, "88:88") // 2 + 12   # 12px side padding
-    x0 = max(0, ((CLOCK_CENTER_X - half_w) // 8) * 8)
-    x1 = -(-(CLOCK_CENTER_X + half_w) // 8) * 8   # ceil-divide to next multiple of 8
-    y0 = CLOCK_Y
-    y1 = y0 + _get_font_height(font_clock) + 8
-
-    region = (x0, y0, x1, y1)
-    rw = x1 - x0
-    rh = y1 - y0
-
-    region_img = Image.new("1", (rw, rh), COLOR_BG)
-    draw_b = ImageDraw.Draw(region_img)
-    # Draw at the shared panel center, translated into region-local coordinates.
-    _draw_centered_text(draw_b, clock_display, font_clock, CLOCK_CENTER_X - x0, 0, COLOR_BLACK)
-
-    return region_img, region
+    active = get_active_bad_weather(weather, now_dt=now_local)
+    if active:
+        return f"{active['type']} until {active['ends']}" if active["ends"] else active["type"]
+    upcoming = get_upcoming_bad_weather(weather, max_hours_ahead=2, now_dt=now_local)
+    if upcoming:
+        when = "now" if upcoming["minutes"] <= 0 else f"from {upcoming['time']}"
+        text = f"{upcoming['type']} {when}"
+        if upcoming.get("probability") is not None:
+            text += f" · {upcoming['probability']}%"
+        return text
+    return None
 
 
-def clock_partial_buffer(region_img: Image.Image) -> bytearray:
+# ---------------------------------------------------------------------------
+# Text drawing — positioned by INK bounds rather than the font's line box.
+# PIL draws text with an internal top bearing, so `draw.text((x, y))` puts the
+# glyphs a few pixels below `y`, by a different amount per size. Aligning by
+# ink lets mixed sizes (e.g. "21" + "°C") share a clean top or baseline.
+# ---------------------------------------------------------------------------
+
+def _ink_box(font, text) -> Tuple[int, int, int, int]:
+    """(left, top, right, bottom) ink box of `text` relative to the draw origin."""
+    try:
+        return font.getbbox(text)
+    except AttributeError:  # very old Pillow
+        w, h = font.getsize(text)
+        return 0, 0, w, h
+
+
+def _width(font, text) -> int:
+    l, _, r, _ = _ink_box(font, text)
+    return r - l
+
+
+def _cap_height(font) -> int:
+    _, t, _, b = _ink_box(font, "H")
+    return b - t
+
+
+def _text(draw, text, font, x, y, fill, align="left") -> Tuple[int, int]:
     """
-    Pack a clock region image (from render_clock_region) into the byte buffer
-    ``epd.display_Partial()`` expects.
-
-    Mirrors the panel convention used by ``EPD.getbuffer()``: 1 bit per pixel,
-    MSB first, rows packed left-to-right, with ink pixels = bit 1. The region
-    width MUST be a multiple of 8 so PIL adds no per-row padding and the buffer
-    length equals ``(width // 8) * height`` — exactly what display_Partial reads.
+    Draw `text` with its ink top at `y`; `x` is the left edge, centre or right
+    edge per `align`. Returns ink (width, height).
     """
-    if region_img.mode != "1":
-        region_img = region_img.convert("1")
-    w, _ = region_img.size
-    if w % 8 != 0:
-        raise ValueError(f"clock region width must be a multiple of 8, got {w}")
-    # PIL '1' -> tobytes packs bit 1 = white(255). The panel wants bit 1 = ink,
-    # so invert, matching EPD.getbuffer().
-    buf = bytearray(region_img.tobytes("raw"))
-    for i in range(len(buf)):
-        buf[i] ^= 0xFF
-    return buf
+    l, t, r, b = _ink_box(font, text)
+    w, h = r - l, b - t
+    ox = x - w // 2 if align == "center" else x - w if align == "right" else x
+    kwargs = {"stroke_width": 1, "stroke_fill": fill} if getattr(font, "fake_bold", False) else {}
+    try:
+        draw.text((ox - l, y - t), text, font=font, fill=fill, **kwargs)
+    except TypeError:  # Pillow < 6.2 has no stroke support
+        draw.text((ox - l, y - t), text, font=font, fill=fill)
+    return w, h
+
+
+def _text_baseline(draw, text, font, x, baseline, fill) -> int:
+    """Draw `text` left-aligned on a shared baseline (for value + small unit). Returns advance."""
+    asc, _ = font.getmetrics()
+    l, _, r, _ = _ink_box(font, text)
+    kwargs = {"stroke_width": 1, "stroke_fill": fill} if getattr(font, "fake_bold", False) else {}
+    try:
+        draw.text((x - l, baseline - asc), text, font=font, fill=fill, **kwargs)
+    except TypeError:
+        draw.text((x - l, baseline - asc), text, font=font, fill=fill)
+    return r - l
+
+
+def _fit_font(make_font, text, max_width, size, min_size):
+    """Largest font from `size` down to `min_size` whose ink width fits."""
+    f = make_font(size)
+    while size > min_size and _width(f, text) > max_width:
+        size -= 1
+        f = make_font(size)
+    return f
+
+
+def _rounded_rect(draw, box, radius, fill=None, outline=None):
+    try:
+        draw.rounded_rectangle(box, radius=radius, fill=fill, outline=outline, width=1)
+    except AttributeError:  # Pillow < 8.2
+        draw.rectangle(box, fill=fill, outline=outline)
+
+
+# ---------------------------------------------------------------------------
+# Layout grid (800 x 480)
+# ---------------------------------------------------------------------------
+MARGIN = 20
+
+HERO_ICON = (112, 172, 150)          # cx, cy, size
+TEMP_CX = 300                         # centre of temperature block
+GRID_TOP = 100                        # centre of first metrics row
+GRID_ROW = 47                         # metrics row pitch
+GRID_COLS = ((436, 522), (626, 716))  # (icon cx, text centre x) per column
+
+CHART = (48, 280, 744, 330)           # plot area x0, y0, x1, y1
+CARDS_TOP = 356
+CARD_H = 116
+CARD_GAP = 10
 
 
 def render_weather(
@@ -472,306 +321,192 @@ def render_weather(
     city_name: Optional[str] = None,
 ) -> Tuple[Image.Image, Image.Image]:
     """
-    Render a complete weather dashboard image pair (black_buffer, red_buffer).
+    Render the weather dashboard as an image pair (black_buffer, red_buffer).
 
     Layout (landscape 800x480):
-      - Top half (~0-240):
-        Left (~0-390): Clock + Hourly forecast strip
-        Right (~400-799): Current weather (icon, temp, details)
-      - Bottom half (~250-440): 5-day forecast columns
-      - Footer (~440-480): Source attribution + last update time
+      - Header:  location (large, centred) with the day + date beneath
+      - Now:     big condition icon | temperature, feels-like, rain notice |
+                 2x4 metrics grid (sun times, wind, humidity, pressure, UV,
+                 visibility, air quality)
+      - Chart:   next 24 h — temperature line (red) over rain-probability bars
+      - Cards:   next 7 days — day, icon, high / low
+
+    Red marks the sun and warmth (sun icons, the temperature line, UV) and
+    alerts; greys are rendered as ordered dither.
 
     Returns two PIL images in mode '1' (1-bit), ready for epd.getbuffer().
     """
-    # Clear icon cache on each render to allow updates
-    _icon_cache.clear()
+    font = _font_loader(font_path)
 
-    # Fall back to a system TrueType font (e.g. DejaVu) before the bitmap default
-    if not (font_path and os.path.isfile(font_path)):
-        font_path = _default_font_path()
-
-    # Font sizes
-    if font_path and os.path.isfile(font_path):
-        font_clock = _load_font(font_path, 96)          # clock display
-        font_temp_large = _load_font(font_path, 72)     # current temperature
-        font_icon_label = _load_font(font_path, 30)     # condition text
-        font_detail = _load_font(font_path, 24)         # wind, feels like, etc
-        font_hourly_temp = _load_font(font_path, 24)    # hourly temps
-        font_hourly_time = _load_font(font_path, 20)    # hourly time labels
-        font_forecast_day = _load_font(font_path, 24)   # day names in forecast
-        font_forecast_temp = _load_font(font_path, 22)  # forecast temps
-        font_footer = _load_font(font_path, 14)         # footer text (smaller)
-    else:
-        font_clock = _load_font(None, 36)
-        font_temp_large = _load_font(None, 48)
-        font_icon_label = _load_font(None, 24)
-        font_detail = _load_font(None, 20)
-        font_hourly_temp = _load_font(None, 16)
-        font_hourly_time = _load_font(None, 14)
-        font_forecast_day = _load_font(None, 16)
-        font_forecast_temp = _load_font(None, 16)
-        font_footer = _load_font(None, 12)
-
-    # Create blank canvases (white background = 255 in mode '1')
     black_img = Image.new("1", (WIDTH, HEIGHT), COLOR_BG)
     red_img = Image.new("1", (WIDTH, HEIGHT), COLOR_BG)
-
     draw_b = ImageDraw.Draw(black_img)
     draw_r = ImageDraw.Draw(red_img)
 
     cur = weather["current"]
-    unit_sym = "°F" if weather.get("unit") == "fahrenheit" else "°C"
-    temp_str = f"{cur['temperature']:.0f}{unit_sym}"
-    condition_text, icon_name = _condition_label_and_icon(cur["weather_code"])
-
-    # --- LAYOUT CONSTANTS ---------------------------------------------------
-    margin = 15
-    left_col_width = 560       # left column width (clock + hourly)
-    divider_x = left_col_width + 5  # vertical separator between left/right
-    right_col_x = divider_x + 10    # start of right column
-    top_section_h = 320        # height of top section (horizontal divider y)
-    forecast_bottom = HEIGHT - 35   # bottom of forecast columns
-    footer_y = HEIGHT - 18     # tiny footer at bottom
-
-    # ========================================================================
-    # TOP LEFT: CLOCK (top-aligned)
-    # ========================================================================
-    y_clock = CLOCK_Y
-
-    # Display the live local time to the current minute. The clock is refreshed
-    # every minute (partial refresh); render_clock_region() must agree with the
-    # value/placement used here, hence the shared CLOCK_* constants.
-    now_dt = _get_local_time(timezone_str)
-    clock_display = now_dt.strftime("%H:%M")
-    date_display = now_dt.strftime("%a, %b %d")
-
-    # Center the clock within the left column
-    left_center_x = CLOCK_CENTER_X
-    _draw_centered_text(draw_b, clock_display, font_clock, left_center_x, y_clock, COLOR_BLACK)
-    y_after_clock = y_clock + _get_font_height(font_clock) + 5
-
-    # Build date line, optionally with city name
-    if city_name:
-        date_line = f"{date_display} — {city_name}"
-    else:
-        date_line = date_display
-    _draw_centered_text(draw_b, date_line, font_hourly_time, left_center_x, y_after_clock, COLOR_BLACK)
-
-    # Sunrise / Sunset below date (contextual)
-    sunrise_time = weather.get("sunrise")
-    sunset_time = weather.get("sunset")
-    sun_y = y_after_clock + _get_font_height(font_hourly_time) + 10
-    cur_hour_min = None
-    if now_dt:
-        cur_hour_min = now_dt.hour * 60 + now_dt.minute
-
-    if sunrise_time and sunset_time and cur_hour_min is not None:
-        sun_lines = []
-        try:
-            sr_h, sr_m = map(int, sunrise_time.split(":"))
-            sr_minutes = sr_h * 60 + sr_m
-            if abs(cur_hour_min - sr_minutes) <= 90:
-                sun_lines.append(f"Sunrise {sunrise_time}")
-        except (ValueError, AttributeError):
-            pass
-        try:
-            ss_h, ss_m = map(int, sunset_time.split(":"))
-            ss_minutes = ss_h * 60 + ss_m
-            if 0 <= (ss_minutes - cur_hour_min) <= 90:
-                sun_lines.append(f"Sunset {sunset_time}")
-        except (ValueError, AttributeError):
-            pass
-        for line in sun_lines:
-            _draw_centered_text(draw_b, line, font_hourly_time, left_center_x, sun_y, COLOR_BLACK)
-            sun_y += _get_font_height(font_hourly_time) + 3
-
-    # ========================================================================
-    # TOP LEFT (below clock): HOURLY FORECAST STRIP (bottom-anchored)
-    # ========================================================================
-    hourly_forecast = weather.get("hourly_forecast", [])
-    num_hours = len(hourly_forecast) if hourly_forecast else 0
-
-    # Calculate total height of one hourly column (time + icon + temp)
-    hourly_column_height = (_get_font_height(font_hourly_time) +   # time label
-                            15 +                                   # spacing
-                            20 +                                   # icon size
-                            15 +                                   # spacing
-                            _get_font_height(font_hourly_temp))    # temp
-
-    # Anchor the hourly strip snug against the horizontal divider (only 4px gap)
-    hourly_bottom = top_section_h - 4
-    y_hourly_top = hourly_bottom - hourly_column_height + 30
-
-    # Draw "HOURLY" label just above the anchored hourly strip items
-    y_hourly_label = y_hourly_top - _get_font_height(font_hourly_time) - 30
-    draw_b.text((margin, y_hourly_label), "HOURLY", font=font_hourly_time, fill=COLOR_BLACK)
-
-    # Bad-weather warning in red, to the RIGHT of the HOURLY label so the two
-    # don't overlap. If it's already raining/snowing/storming, show when it ends;
-    # otherwise show when the next event starts. Times (not "in N min") are used
-    # because the panel only refreshes periodically and a countdown would go stale.
-    from weather_dashboard.weather import get_active_bad_weather, get_upcoming_bad_weather
+    unit_letter = "F" if weather.get("unit") == "fahrenheit" else "C"
     now_local = _get_local_time(timezone_str)
-    bw_text = None
-
-    active = get_active_bad_weather(weather, now_dt=now_local)
-    if active:
-        if active["ends"]:
-            bw_text = f"{active['type']} until {active['ends']}"
-        else:
-            bw_text = f"{active['type']} ongoing"
-    else:
-        upcoming = get_upcoming_bad_weather(weather, max_hours_ahead=2, now_dt=now_local)
-        if upcoming:
-            when = "now" if upcoming["minutes"] <= 0 else f"~{upcoming['time']}"
-            bw_text = f"{upcoming['type']} {when}"
-            if upcoming.get("probability") is not None:
-                bw_text += f" ({upcoming['probability']}%)"
-
-    if bw_text:
-        label_w = _get_text_width(font_hourly_time, "HOURLY")
-        draw_r.text((margin + label_w + 14, y_hourly_label), bw_text,
-                    font=font_hourly_time, fill=COLOR_RED)
-
-    # Calculate spacing for hourly items
-    if num_hours > 0:
-        available_width = left_col_width - margin * 2
-        hour_block_width = max(available_width // num_hours, 40)
-    else:
-        hour_block_width = 50
-
-    for i, hour_data in enumerate(hourly_forecast[:num_hours]):
-        x_base = margin + i * hour_block_width
-        hour_label = hour_data.get("hour", "?")
-        hour_temp = f"{hour_data.get('temperature', '?'):.0f}"
-        _, hour_icon = _condition_label_and_icon(hour_data.get("weather_code", 0))
-
-        cx = x_base + hour_block_width // 2
-
-        # Icon (centered at anchored position)
-        icon_center_y = y_hourly_top + (_get_font_height(font_hourly_time) // 2)
-        icon_size = 24
-        if not _paste_icon(black_img, hour_icon, cx, icon_center_y, icon_size):
-            black_img.putpixel((cx, icon_center_y), COLOR_BLACK)
-
-        # Time label above icon
-        _draw_centered_text(draw_b, hour_label, font_hourly_time, cx,
-                            y_hourly_top - _get_font_height(font_hourly_time) - 4, COLOR_BLACK)
-
-        # Temperature below icon
-        temp_text = f"{hour_temp}\u00b0"
-        _draw_centered_text(draw_b, temp_text, font_hourly_temp, cx,
-                            icon_center_y + icon_size // 2 + 4, COLOR_BLACK)
+    sunrise, sunset = weather.get("sunrise"), weather.get("sunset")
 
     # ========================================================================
-    # TOP RIGHT: CURRENT WEATHER
+    # HEADER
     # ========================================================================
-    y_right = margin + 5
+    title = city_name or ""
+    if title:
+        f_title = _fit_font(lambda s: font(s, "semibold"), title, WIDTH - 200, 32, 22)
+        _text(draw_b, title, f_title, WIDTH // 2, 14, COLOR_BLACK, align="center")
+    _text(draw_b, _format_date(now_local), font(19), WIDTH // 2, 54 if title else 22,
+          COLOR_BLACK, align="center")
 
-    # Large weather icon (centered in right column)
-    right_col_width = WIDTH - right_col_x - margin
-    icon_cx = right_col_x + right_col_width // 2
-    icon_cy = y_right + 50
-    icon_size_large = 80
-    _paste_icon(black_img, icon_name, icon_cx, icon_cy, icon_size_large)
-
-    # Large temperature (RED) below icon
-    temp_y = icon_cy + icon_size_large // 2 - 10
-    _draw_centered_text(draw_r, temp_str, font_temp_large, icon_cx, temp_y, COLOR_RED)
-
-    # Condition text below temperature
-    cond_y = temp_y + _get_font_height(font_temp_large) + 5
-    _draw_centered_text(draw_b, condition_text, font_icon_label, icon_cx, cond_y, COLOR_BLACK)
-
-    # Hi / Lo for today
-    hi_lo_str = f"Hi {weather['today_high']:.0f}{unit_sym}   Lo {weather['today_low']:.0f}{unit_sym}"
-    hilo_y = cond_y + _get_font_height(font_icon_label) + 8
-    _draw_centered_text(draw_b, hi_lo_str, font_detail, icon_cx, hilo_y, COLOR_BLACK)
-
-    # Wind speed
-    wind_str = f"Wind: {cur['wind_speed']:.0f} km/h"
-    wind_y = hilo_y + _get_font_height(font_detail) + 5
-    _draw_centered_text(draw_b, wind_str, font_detail, icon_cx, wind_y, COLOR_BLACK)
-
-    # Feels like
-    feels_str = f"Feels like: {cur['feels_like']:.0f}{unit_sym}"
-    feels_y = wind_y + _get_font_height(font_detail) + 5
-    _draw_centered_text(draw_b, feels_str, font_detail, icon_cx, feels_y, COLOR_BLACK)
-
-    # ========================================================================
-    # SEPARATORS
-    # ========================================================================
-    # Vertical divider between left and right columns
-    _draw_thick_line(draw_b, [(divider_x, margin), (divider_x, top_section_h)],
-                    fill=COLOR_BLACK, thickness=2)
-
-    # Horizontal separator above forecast
-    sep_y = top_section_h
-    _draw_thick_line(draw_b, [(0, sep_y), (WIDTH, sep_y)], fill=COLOR_BLACK, thickness=2)
-
-    # ========================================================================
-    # BOTTOM: 5-DAY FORECAST STRIP
-    # ========================================================================
-    forecast = weather.get("forecast", [])
-
-    strip_top = sep_y + 8
-    num_days = len(forecast) if forecast else 0
-    day_width = WIDTH // max(num_days, 1)
-
-    for i, day in enumerate(forecast[:5]):
-        x_center = i * day_width + day_width // 2
-        y_pos = strip_top + 2
-        day_label = day.get("weekday", "?")
-        day_high = f"{day.get('high', '?'):.0f}{unit_sym}"
-        day_low = f"{day.get('low', '?'):.0f}{unit_sym}"
-
-        # Day abbreviation (centered)
-        _draw_centered_text(draw_b, day_label, font_forecast_day, x_center, y_pos, COLOR_BLACK)
-
-        # Forecast icon (compressed vertically by ~1/3)
-        _, day_icon = _condition_label_and_icon(day.get("weather_code", 0))
-        icon_center_y = y_pos + _get_font_height(font_forecast_day) + 20
-        icon_size_medium = 30
-
-        is_precip = day_icon in ("rain", "snow", "thunder")
-        if is_precip:
-            # Red icons for precipitation days (uses special red buffer)
-            _paste_icon_red(red_img, day_icon, x_center, icon_center_y, icon_size_medium)
-        else:
-            _paste_icon(black_img, day_icon, x_center, icon_center_y, icon_size_medium)
-
-        # High temp (red accent) below icon
-        hi_y = icon_center_y + icon_size_medium // 2 + 2
-        _draw_centered_text(draw_r, day_high, font_forecast_temp, x_center, hi_y, COLOR_RED)
-
-        # Low temp below high (tighter gap)
-        lo_y = hi_y + _get_font_height(font_forecast_temp) + 1
-        _draw_centered_text(draw_b, day_low, font_forecast_temp, x_center, lo_y, COLOR_BLACK)
-
-        # Column divider (not after last column)
-        if i < num_days - 1 and i < 5:
-            div_x = (i + 1) * day_width
-            draw_b.line([(div_x, strip_top), (div_x, forecast_bottom)], fill=COLOR_BLACK)
-
-    # ========================================================================
-    # FOOTER: Source + Last Updated
-    # ========================================================================
-    _draw_thick_line(draw_b, [(0, footer_y - 10), (WIDTH, footer_y - 10)],
-                    fill=COLOR_BLACK, thickness=1)
-
-    footer_left = "Source: Open-Meteo"
-    draw_b.text((margin, footer_y), footer_left, font=font_footer, fill=COLOR_BLACK)
-
-    # Timestamp on the right
-    now_utc_str = datetime.now(timezone.utc).strftime("Updated: %Y-%m-%d %H:%M UTC")
-    ftw = _get_text_width(font_footer, now_utc_str)
-    draw_b.text((WIDTH - margin - ftw, footer_y), now_utc_str, font=font_footer, fill=COLOR_BLACK)
-
-    # Stale data indicator (if needed)
+    # Freshness stamp, tucked in the corner
+    f_stamp = font(12)
+    stamp = f"Updated {now_local.strftime('%H:%M')}"
+    sw, _ = _text(draw_b, stamp, f_stamp, WIDTH - 12, 10, COLOR_BLACK, align="right")
     if stale:
-        _draw_centered_text(draw_r, "!! STALE DATA !!", font_detail, WIDTH // 2, footer_y, COLOR_RED)
+        _text(draw_r, "Offline", font(12, "semibold"), WIDTH - 12 - sw - 8, 10, COLOR_RED, align="right")
+
+    # ========================================================================
+    # NOW: icon | temperature | metrics grid
+    # ========================================================================
+    hero_night = _is_night(now_local.strftime("%H:%M"), sunrise, sunset)
+    cx, cy, size = HERO_ICON
+    draw_icon(black_img, red_img, _icon_for(cur["weather_code"], hero_night), cx, cy, size)
+
+    f_temp = font(96)
+    f_unit = font(30)
+    temp_s = _num(cur["temperature"])
+    unit_s = f"°{unit_letter}"
+    tw, uw = _width(f_temp, temp_s), _width(f_unit, unit_s)
+    t_left = TEMP_CX - (tw + 4 + uw) // 2
+    temp_top = 122
+    _, th = _text(draw_b, temp_s, f_temp, t_left, temp_top, COLOR_BLACK)
+    _text(draw_b, unit_s, f_unit, t_left + tw + 4, temp_top, COLOR_BLACK)
+
+    condition, _ = _condition_label_and_icon(cur["weather_code"])
+    y = temp_top + th + 16
+    f_sub = font(18)
+    _, h = _text(draw_b, f"Feels like {_num(cur['feels_like'])}°", f_sub, TEMP_CX, y,
+                 COLOR_BLACK, align="center")
+    y += h + 10
+    f_cond = _fit_font(lambda s: font(s, "medium"), condition, 200, 17, 13)
+    _, h = _text(draw_b, condition, f_cond, TEMP_CX, y, COLOR_BLACK, align="center")
+
+    alert = _bad_weather_text(weather, now_local)
+    if alert:
+        f_alert = _fit_font(lambda s: font(s, "medium"), alert, 210, 16, 12)
+        _text(draw_r, alert, f_alert, TEMP_CX, y + h + 9, COLOR_RED, align="center")
+
+    aqi = weather.get("air_quality")
+    from weather_dashboard.weather import aqi_label
+    vis_v, vis_u = _visibility(cur.get("visibility"))
+    uv = cur.get("uv_index")
+    metrics = [
+        ("sunrise", "Sunrise", sunrise or "-", "", {}),
+        ("sunset", "Sunset", sunset or "-", "", {}),
+        ("wind", "Wind", _num(cur.get("wind_speed")), f"km/h {_compass(cur.get('wind_direction'))}".strip(), {}),
+        ("humidity", "Humidity", _num(cur.get("humidity")) if cur.get("humidity") is not None else "-", "%", {}),
+        ("pressure", "Pressure", _num(cur.get("pressure")) if cur.get("pressure") is not None else "-", "hPa", {}),
+        ("uv", "UV Index", f"{uv:.1f}" if uv is not None else "-", "", {}),
+        ("visibility", "Visibility", vis_v, vis_u, {}),
+        ("air_quality", "Air Quality", str(aqi) if aqi is not None else "-", aqi_label(aqi), {"value": aqi}),
+    ]
+    f_label, f_value, f_vunit = font(14), font(21, "semibold"), font(12)
+    for i, (icon, label, value, unit, kw) in enumerate(metrics):
+        icon_cx, text_cx = GRID_COLS[i % 2]
+        row_cy = GRID_TOP + (i // 2) * GRID_ROW
+        draw_icon(black_img, red_img, icon, icon_cx, row_cy + 2, 32, **kw)
+        _text(draw_b, label, f_label, text_cx, row_cy - 16, COLOR_BLACK, align="center")
+        # value + small unit share a baseline, centred as a pair
+        vw = _width(f_value, value)
+        uw = _width(f_vunit, unit) + 4 if unit else 0
+        x = text_cx - (vw + uw) // 2
+        baseline = row_cy + 20
+        x += _text_baseline(draw_b, value, f_value, x, baseline, COLOR_BLACK) + 4
+        if unit:
+            _text_baseline(draw_b, unit, f_vunit, x, baseline, COLOR_BLACK)
+
+    # ========================================================================
+    # CHART: next 24 h
+    # ========================================================================
+    _draw_chart(black_img, red_img, draw_b, draw_r, weather.get("hourly_chart") or [], font)
+
+    # ========================================================================
+    # CARDS: next 7 days
+    # ========================================================================
+    days = (weather.get("forecast") or [])[:7]
+    if days:
+        n = len(days)
+        card_w = (WIDTH - 2 * MARGIN - (n - 1) * CARD_GAP) / n
+        f_day, f_range = font(17, "semibold"), font(15)
+        for i, d in enumerate(days):
+            x0 = int(MARGIN + i * (card_w + CARD_GAP))
+            x1 = int(x0 + card_w)
+            mid = (x0 + x1) // 2
+            _rounded_rect(draw_b, [x0, CARDS_TOP, x1, CARDS_TOP + CARD_H], 9, outline=COLOR_BLACK)
+            _text(draw_b, d.get("weekday", "?"), f_day, mid, CARDS_TOP + 10, COLOR_BLACK, align="center")
+            draw_icon(black_img, red_img, _icon_for(d.get("weather_code", 0), night=False),
+                      mid, CARDS_TOP + 60, 56)
+            _text(draw_b, f"{_num(d.get('high'))}° / {_num(d.get('low'))}°", f_range, mid,
+                  CARDS_TOP + CARD_H - 23, COLOR_BLACK, align="center")
 
     return black_img, red_img
+
+
+def _draw_chart(black_img, red_img, draw_b, draw_r, series: List[Dict[str, Any]], font) -> None:
+    """24 h chart: rain-probability bars (grey) under a red temperature line."""
+    if len(series) < 2:
+        return
+    x0, y0, x1, y1 = CHART
+    h = y1 - y0
+    n = len(series) - 1
+    step = (x1 - x0) / n
+
+    temps = [p.get("temperature") or 0 for p in series]
+    t_min, t_max = min(temps), max(temps)
+    lo, hi = round(t_min) - 1, round(t_max) + 1   # 1° headroom so the line never touches the edges
+
+    def ty(t):
+        return y1 - (t - lo) / (hi - lo) * h
+
+    pts = [(x0 + i * step, ty(t)) for i, t in enumerate(temps)]
+
+    # Light red wash under the temperature line
+    area = Image.new("L", (WIDTH, HEIGHT), 0)
+    ImageDraw.Draw(area).polygon([(x0, y1)] + pts + [(x1, y1)], fill=255)
+    wash = Image.composite(dither_mask(0.125, 0, 0, WIDTH, HEIGHT), Image.new("L", (WIDTH, HEIGHT), 0), area)
+    red_img.paste(0, (0, 0), wash)
+
+    # Rain-probability bars, one per hour, occluding the wash
+    for i in range(n):
+        p = series[i].get("probability") or 0
+        if p <= 0:
+            continue
+        bx0, bx1 = int(x0 + i * step) + 1, int(x0 + (i + 1) * step) - 1
+        by0 = int(y1 - p / 100 * h)
+        bw, bh = bx1 - bx0, y1 - by0
+        if bw <= 0 or bh <= 0:
+            continue
+        red_img.paste(255, (bx0, by0, bx1, y1))
+        black_img.paste(0, (bx0, by0), dither_mask(0.375, bx0, by0, bw, bh))
+        draw_b.line([(bx0, by0), (bx1 - 1, by0)], fill=COLOR_BLACK)
+
+    # Temperature line on top (clear black underneath so red stays clean)
+    draw_b.line(pts, fill=COLOR_BG, width=4)
+    draw_r.line(pts, fill=COLOR_RED, width=2)
+
+    # Axes labels: temperature range left, probability range right
+    f_axis = font(12)
+    _text(draw_b, f"{hi}°", f_axis, x0 - 8, y0 - 2, COLOR_BLACK, align="right")
+    _text(draw_b, f"{lo}°", f_axis, x0 - 8, y1 - 9, COLOR_BLACK, align="right")
+    _text(draw_b, "100%", f_axis, x1 + 8, y0 - 2, COLOR_BLACK)
+    _text(draw_b, "0%", f_axis, x1 + 8, y1 - 9, COLOR_BLACK)
+    draw_b.line([(x0, y1 + 1), (x1, y1 + 1)], fill=COLOR_BLACK)
+
+    # Hour labels every 3 h
+    for i in range(0, n + 1, 3):
+        t = series[i].get("time", "")
+        label = t[11:13] + "h" if len(t) >= 13 else ""
+        _text(draw_b, label, f_axis, int(x0 + i * step), y1 + 7, COLOR_BLACK, align="center")
 
 
 def render_blank() -> Tuple[Image.Image, Image.Image]:
