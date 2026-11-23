@@ -188,21 +188,33 @@ def diff_weather(
     return changes
 
 
+def _screen_hash(weather: Dict[str, Any], extra: str = "") -> str:
+    """
+    Hash of everything that decides what the screen shows: the weather data
+    plus `extra` — non-weather state the caller renders (e.g. the date and
+    the offline flag), so a change there also triggers a redraw.
+    """
+    h = weather_data_hash(weather)
+    return f"{h}|{extra}" if extra else h
+
+
 def should_full_refresh(
     cache_dir: str,
     weather: Dict[str, Any],
     threshold: int,
+    extra: str = "",
 ) -> Tuple[bool, str]:
     """
-    Determine whether a full panel refresh is needed.
+    Decide whether to redraw the panel (always a full refresh) or skip it.
 
     Returns (do_refresh, reason).
-    A full refresh is required if:
+    A redraw is required if:
       - No previous cache exists (first run or corrupt)
-      - Weather data has changed since last render
-      - The refresh counter has reached the threshold
+      - The screen content (weather data or `extra`) changed since the last redraw
+      - `threshold` runs in a row were skipped (periodic redraw against ghosting)
+    Otherwise the panel is left untouched.
     """
-    current_hash = weather_data_hash(weather)
+    current_hash = _screen_hash(weather, extra)
     meta = read_render_meta(cache_dir)
 
     if meta is None:
@@ -212,10 +224,10 @@ def should_full_refresh(
     counter = meta.get("refresh_counter", 0)
 
     if prev_hash != current_hash:
-        return True, "Weather data has changed"
+        return True, "Screen content has changed"
 
     if counter >= threshold:
-        return True, f"Refresh counter ({counter}) reached threshold ({threshold})"
+        return True, f"Skipped {counter} runs in a row (threshold {threshold}) — periodic redraw"
 
     return False, f"Unchanged data, counter {counter}/{threshold} — skip"
 
@@ -224,9 +236,10 @@ def update_meta_after_run(
     cache_dir: str,
     weather: Dict[str, Any],
     did_refresh: bool,
+    extra: str = "",
 ) -> None:
     """Update the render metadata after a run completes."""
-    current_hash = weather_data_hash(weather)
+    current_hash = _screen_hash(weather, extra)
 
     if did_refresh:
         # Reset counter on full refresh

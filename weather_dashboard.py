@@ -108,18 +108,16 @@ def _write_debug_images(black_img, red_img, cache_dir: str):
     logger.info("Debug images saved to %s (preview.png is the composite)", resolved)
 
 
-def _send_to_panel(epd_module, black_img, red_img, full_refresh: bool):
+def _send_to_panel(epd_module, black_img, red_img):
     """
-    Push the rendered buffers to the physical e-Paper panel.
+    Push the rendered buffers to the physical e-Paper panel with a full
+    refresh (~15-20s, clears ghosting).
 
     Returns the initialized EPD object so the caller can put it to sleep.
-    A full refresh (~15-20s) clears ghosting and is used when the weather
-    changed; a fast refresh (~5-8s) is used otherwise.
     """
     epd = epd_module.EPD()
-    label = "full refresh" if full_refresh else "fast refresh"
-    logger.info("Initializing e-Paper (%s) ...", label)
-    init_result = epd.init() if full_refresh else epd.init_Fast()
+    logger.info("Initializing e-Paper (full refresh) ...")
+    init_result = epd.init()
     if init_result != 0:
         raise RuntimeError(f"e-Paper init failed with code {init_result}")
     logger.info("Sending image buffers to panel ...")
@@ -273,27 +271,39 @@ def main() -> int:
                     _emit_headless(black_img, red_img, cache_dir, args.output)
                 else:
                     with _panel_lock(cache_dir):
-                        epd = _send_to_panel(epd_module, black_img, red_img, full_refresh=True)
+                        epd = _send_to_panel(epd_module, black_img, red_img)
                     init_called = True
                 return 1
             stale_mode = True
 
-        # Step 2 — Determine if weather data changed (full refresh needed)
-        do_full_refresh, reason = should_full_refresh(
+        # Step 2 — Compare with what's on screen. Besides the weather, the screen
+        # shows the date and (when the fetch failed) an "Offline" note, so those
+        # are part of the comparison too.
+        from weather_dashboard.render import _get_local_time
+        screen_state = f"{_get_local_time(timezone_str).date().isoformat()}|stale={stale_mode}"
+        do_refresh, reason = should_full_refresh(
             cache_dir=cache_dir,
             weather=weather,
             threshold=cfg["full_refresh_interval"],
+            extra=screen_state,
         )
-        logger.info("%s refresh: %s", "Full" if do_full_refresh else "Fast", reason)
+        logger.info("%s: %s", "Redraw" if do_refresh else "Skip", reason)
 
-        # List exactly what changed (vs the last cached weather) when a full
-        # refresh is driven by new data — empty for first run / counter refresh.
-        if do_full_refresh:
-            changes = diff_weather(read_last_weather(cache_dir), weather)
-            if changes:
-                logger.info("Weather changed since last update:")
-                for change in changes:
-                    logger.info("  • %s", change)
+        if not do_refresh:
+            # Nothing on screen would change: leave the panel (and the preview
+            # images, which mirror the panel) untouched to save panel wear.
+            write_last_weather(cache_dir, weather)
+            update_meta_after_run(cache_dir, weather, did_refresh=False, extra=screen_state)
+            logger.info("Weather dashboard run finished (no change, panel untouched)")
+            return 0
+
+        # List exactly what changed (vs the last cached weather) — empty for
+        # the first run or a periodic redraw.
+        changes = diff_weather(read_last_weather(cache_dir), weather)
+        if changes:
+            logger.info("Weather changed since last update:")
+            for change in changes:
+                logger.info("  • %s", change)
 
         # Step 3 — Render images (date from the live local clock, not the API snapshot)
         black_img, red_img = render_weather(
@@ -307,12 +317,12 @@ def main() -> int:
             _emit_headless(black_img, red_img, cache_dir, args.output)
         else:
             with _panel_lock(cache_dir):
-                epd = _send_to_panel(epd_module, black_img, red_img, full_refresh=do_full_refresh)
+                epd = _send_to_panel(epd_module, black_img, red_img)
             init_called = True
 
         # Step 5 — Update cache + refresh metadata
         write_last_weather(cache_dir, weather)
-        update_meta_after_run(cache_dir, weather, did_refresh=do_full_refresh)
+        update_meta_after_run(cache_dir, weather, did_refresh=True, extra=screen_state)
 
     except Exception as exc:
         logger.exception("Unhandled exception during run: %s", exc)
