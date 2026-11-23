@@ -10,8 +10,8 @@ A Python script that fetches current weather from [Open-Meteo](https://open-mete
 - 24-hour chart: temperature line over rain-probability bars
 - 7-day forecast cards with icons and high / low
 - Filled vector icons drawn for the black/white/red panel: red for sun and warmth, dithered black for greys; moon variants at night
-- Smart refresh: only updates the display when data actually changes (saves e-ink panel wear)
-- Forced full-refresh every N runs (configurable, default: 24) to prevent image ghosting
+- Smart refresh: the panel is only redrawn when something on screen would change (weather at displayed precision, the date, or the offline state); otherwise it is left untouched, saving panel wear. "Updated HH:MM" therefore shows when the screen last changed
+- Every redraw is a full refresh; after N skipped runs in a row (`full_refresh_interval`, default 24) it redraws anyway to clear ghosting
 - Stale-data fallback: if the API is unreachable, redraws last known good data with a red "Offline" note next to the update time
 - Debug PNG images saved to cache directory for inspection without physical hardware
 
@@ -70,7 +70,7 @@ Edit `config.json`:
 | `timezone` | IANA timezone for correct day boundaries |
 | `temperature_unit` | `"celsius"` or `"fahrenheit"` |
 | `cache_dir` | Where weather cache + debug images are stored. Relative paths (default `"cache"`) are resolved against the project directory, so the cache travels with the repo; absolute paths and `~` are also accepted. |
-| `full_refresh_interval` | Force a full panel refresh every N runs (default 24) |
+| `full_refresh_interval` | Redraw anyway after this many skipped runs in a row (default 24 — 6 hours at a 15-minute schedule) |
 | `api_timeout_seconds` | HTTP timeout for Open-Meteo requests |
 | `font_path` | Optional absolute path to a `.ttf`/`.ttc` file. `null` = bundled Jost. |
 
@@ -83,7 +83,7 @@ python3 weather_dashboard.py
 The script will:
 1. Fetch weather from Open-Meteo
 2. Compare with the last rendered data
-3. Update the display **only** if data changed or the periodic refresh threshold was reached
+3. Redraw the display (full refresh) **only** if the screen content changed or the periodic redraw threshold was reached — otherwise leave the panel untouched
 4. Put the panel to sleep and exit (code 0 = success, non-zero = error)
 
 ### Override config path
@@ -116,7 +116,9 @@ rather than a bare filename that lands in the project root.
 
 ### Option A: cron
 
-Edit crontab (`crontab -e`) and run the dashboard every 15–30 minutes:
+Edit crontab (`crontab -e`) and run the dashboard every 15 minutes. Open-Meteo
+updates current conditions every 15 minutes, so running more often only fetches the
+same data; runs where nothing changed don't touch the panel:
 
 ```cron
 */15 * * * * cd /home/pi/waveshare_weather_display && python3 weather_dashboard.py >> /var/log/weather_dashboard.log 2>&1
@@ -141,11 +143,11 @@ Create `/etc/systemd/system/weather-dashboard.timer`:
 
 ```ini
 [Unit]
-Description=Run weather dashboard every 30 minutes
+Description=Run weather dashboard every 15 minutes
 
 [Timer]
 OnBootSec=2min
-OnUnitActiveSec=30min
+OnUnitActiveSec=15min
 
 [Install]
 WantedBy=timers.target

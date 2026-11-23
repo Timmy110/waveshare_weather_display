@@ -105,3 +105,32 @@ def test_diff_reports_forecast_day_change():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+def test_unchanged_screen_state_skips(tmp_path):
+    from weather_dashboard.cache import should_full_refresh, update_meta_after_run
+
+    w = _weather()
+    update_meta_after_run(str(tmp_path), w, did_refresh=True, extra="2026-11-23|stale=False")
+    do, _ = should_full_refresh(str(tmp_path), w, threshold=24, extra="2026-11-23|stale=False")
+    assert do is False
+
+
+def test_new_date_forces_redraw(tmp_path):
+    """Same weather after midnight must still redraw, or the date on screen goes stale."""
+    from weather_dashboard.cache import should_full_refresh, update_meta_after_run
+
+    w = _weather()
+    update_meta_after_run(str(tmp_path), w, did_refresh=True, extra="2026-11-23|stale=False")
+    do, _ = should_full_refresh(str(tmp_path), w, threshold=24, extra="2026-11-24|stale=False")
+    assert do is True
+
+
+def test_going_offline_forces_redraw(tmp_path):
+    """Falling back to cached data must redraw so the 'Offline' note appears."""
+    from weather_dashboard.cache import should_full_refresh, update_meta_after_run
+
+    w = _weather()
+    update_meta_after_run(str(tmp_path), w, did_refresh=True, extra="2026-11-23|stale=False")
+    do, _ = should_full_refresh(str(tmp_path), w, threshold=24, extra="2026-11-23|stale=True")
+    assert do is True
